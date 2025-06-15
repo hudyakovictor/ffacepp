@@ -14,13 +14,16 @@ from utils.functions import plot_image
 from .tddfa_util import _to_ctype
 
 cfg = {
-    'intensity_ambient': 0.3,
-    'color_ambient': (1, 1, 1),
-    'intensity_directional': 0.6,
-    'color_directional': (1, 1, 1),
-    'intensity_specular': 0.1,
-    'specular_exp': 5,
-    'light_pos': (0, 0, 5),
+    'intensity_ambient': 0.5,  # Почти нет фонового освещения
+    'color_ambient': (0.0, 0.0, 0.0),  # Чёрный фон
+
+    'intensity_directional': 1.0,  # Яркий направленный свет
+    'color_directional': (0.0, 0.0, 1.0),  # Красный цвет света
+
+    'intensity_specular': 0.3,  # Немного блеска
+    'specular_exp': 90,  # Очень острые блики
+
+    'light_pos': (0, 10, 5),  # Можно немного сместить свет для интересных теней
     'view_pos': (0, 0, 5)
 }
 

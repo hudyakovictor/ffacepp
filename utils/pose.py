@@ -13,6 +13,7 @@ import numpy as np
 from math import cos, sin, atan2, asin, sqrt
 
 from .functions import calc_hypotenuse, plot_image
+from core_config import COLORS_RGB, CAMERA_BOX_REAR_SIZE, CAMERA_BOX_FRONT_SIZE_FACTOR # Импортируем новые константы
 
 
 def P2sRt(P):
@@ -73,7 +74,7 @@ def calc_pose(param):
     return P, pose
 
 
-def build_camera_box(rear_size=90):
+def build_camera_box(rear_size=CAMERA_BOX_REAR_SIZE):
     point_3d = []
     rear_depth = 0
     point_3d.append((-rear_size, -rear_size, rear_depth))
@@ -82,8 +83,8 @@ def build_camera_box(rear_size=90):
     point_3d.append((rear_size, -rear_size, rear_depth))
     point_3d.append((-rear_size, -rear_size, rear_depth))
 
-    front_size = int(4 / 3 * rear_size)
-    front_depth = int(4 / 3 * rear_size)
+    front_size = int(CAMERA_BOX_FRONT_SIZE_FACTOR * rear_size) # Используем константу
+    front_depth = int(CAMERA_BOX_FRONT_SIZE_FACTOR * rear_size) # Используем константу
     point_3d.append((-front_size, -front_size, front_depth))
     point_3d.append((-front_size, front_size, front_depth))
     point_3d.append((front_size, front_size, front_depth))
@@ -94,7 +95,7 @@ def build_camera_box(rear_size=90):
     return point_3d
 
 
-def plot_pose_box(img, P, ver, color=(40, 255, 0), line_width=2):
+def plot_pose_box(img, P, ver, color=COLORS_RGB['green'], line_width=2): # Используем константу цвета
     """ Draw a 3D box as annotation of pose.
     Ref:https://github.com/yinguobing/head-pose-estimation/blob/master/pose_estimator.py
     Args:
@@ -135,7 +136,8 @@ def viz_pose(img, param_lst, ver_lst, show_flag=False, wfp=None):
         cv2.imwrite(wfp, img)
         print(f'Save visualization result to {wfp}')
 
-    if show_flag:
+    if show_flag: # Опциональное отображение
+        from .functions import plot_image # Импорт внутри функции, чтобы избежать циклической зависимости
         plot_image(img)
 
     return img

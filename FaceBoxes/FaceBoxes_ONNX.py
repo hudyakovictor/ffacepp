@@ -141,7 +141,7 @@ class FaceBoxes_ONNX(object):
                 bbox = [xmin, ymin, xmax, ymax, score]
                 det_bboxes.append(bbox)
 
-        return det_bboxes
+        return np.array(det_bboxes) if det_bboxes else np.array([])
 
 
 def main():

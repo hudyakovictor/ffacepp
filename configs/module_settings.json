@@ -1,0 +1,26 @@
+{
+    "ui_settings": {
+        "theme": "soft",
+        "enable_dark_mode": true,
+        "animation_speed": "normal",
+        "max_concurrent_uploads": 50,
+        "preview_size": 200
+    },
+    "analysis_settings": {
+        "default_batch_size": 10,
+        "max_memory_usage": "4GB",
+        "enable_gpu_acceleration": true,
+        "cache_results": true
+    },
+    "visualization_settings": {
+        "default_plot_height": 500,
+        "enable_3d_rendering": true,
+        "color_scheme": "viridis",
+        "animation_fps": 30
+    },
+    "export_settings": {
+        "default_format": "HTML",
+        "include_metadata": true,
+        "compress_output": true
+    }
+}

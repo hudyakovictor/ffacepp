@@ -1,0 +1,32 @@
+{
+    "forehead": {
+        "haralick_mean_contrast": 0.15,
+        "haralick_std_contrast": 0.05,
+        "shannon_entropy_mean": 7.5,
+        "shannon_entropy_std": 0.5,
+        "gabor_energy_mean": 100.0,
+        "gabor_energy_std": 20.0,
+        "lbp_uniformity_mean": 0.9,
+        "lbp_uniformity_std": 0.05
+    },
+    "cheek": {
+        "haralick_mean_contrast": 0.18,
+        "haralick_std_contrast": 0.06,
+        "shannon_entropy_mean": 7.8,
+        "shannon_entropy_std": 0.6,
+        "gabor_energy_mean": 110.0,
+        "gabor_energy_std": 25.0,
+        "lbp_uniformity_mean": 0.88,
+        "lbp_uniformity_std": 0.06
+    },
+    "default": {
+        "haralick_mean_contrast": 0.17,
+        "haralick_std_contrast": 0.05,
+        "shannon_entropy_mean": 7.6,
+        "shannon_entropy_std": 0.55,
+        "gabor_energy_mean": 105.0,
+        "gabor_energy_std": 22.0,
+        "lbp_uniformity_mean": 0.89,
+        "lbp_uniformity_std": 0.055
+    }
+} 

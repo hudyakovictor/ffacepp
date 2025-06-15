@@ -1,0 +1,20 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Экспертный отчет анализа лицевой идентичности</title>
+    <meta charset="utf-8">
+</head>
+<body>
+    <h1>Экспертный отчет</h1>
+    <p>Это подробный экспертный отчет, сгенерировано {{ generation_time }}.</p>
+    <p>Включает глубокий анализ метрик и аномалий.</p>
+    <h3>Рекомендации:</h3>
+    <ul>
+    {% for recommendation in insights.recommendations %}
+        <li>{{ recommendation }}</li>
+    {% endfor %}
+    </ul>
+</body>
+</html>
+        

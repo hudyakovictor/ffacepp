@@ -27,7 +27,7 @@ class TDDFA_ONNX(object):
 
         # load onnx version of BFM
         bfm_fp = kvs.get('bfm_fp', make_abs_path('configs/bfm_noneck_v3.pkl'))
-        bfm_onnx_fp = bfm_fp.replace('.pkl', '.onnx')
+        bfm_onnx_fp = str(bfm_fp).replace('.pkl', '.onnx')
         if not osp.exists(bfm_onnx_fp):
             convert_bfm_to_onnx(
                 bfm_onnx_fp,
@@ -50,7 +50,15 @@ class TDDFA_ONNX(object):
             'param_mean_std_fp', make_abs_path(f'configs/param_mean_std_62d_{self.size}x{self.size}.pkl')
         )
 
-        onnx_fp = kvs.get('onnx_fp', kvs.get('checkpoint_fp').replace('.pth', '.onnx'))
+        # ИСПРАВЛЕНО: Правильная инициализация onnx_fp с учетом, что checkpoint_fp может быть None
+        onnx_fp = kvs.get('onnx_fp')
+        if onnx_fp is None:
+            checkpoint_fp = kvs.get('checkpoint_fp')
+            if checkpoint_fp is not None:
+                onnx_fp = str(checkpoint_fp).replace('.pth', '.onnx')
+            else:
+                # Fallback, если onnx_fp и checkpoint_fp не предоставлены
+                onnx_fp = make_abs_path(f'configs/mb1_120x120.onnx') 
 
         # convert to onnx online if not existed
         if onnx_fp is None or not osp.exists(onnx_fp):
@@ -102,11 +110,19 @@ class TDDFA_ONNX(object):
         ver_lst = []
         for param, roi_box in zip(param_lst, roi_box_lst):
             R, offset, alpha_shp, alpha_exp = _parse_param(param)
+            # Убеждаемся, что R, offset, alpha_shp, alpha_exp являются массивами numpy
+            R = np.array(R) if isinstance(R, list) else R
+            offset = np.array(offset) if isinstance(offset, list) else offset
+            alpha_shp = np.array(alpha_shp) if isinstance(alpha_shp, list) else alpha_shp
+            alpha_exp = np.array(alpha_exp) if isinstance(alpha_exp, list) else alpha_exp
+
             if dense_flag:
                 inp_dct = {
                     'R': R, 'offset': offset, 'alpha_shp': alpha_shp, 'alpha_exp': alpha_exp
                 }
                 pts3d = self.bfm_session.run(None, inp_dct)[0]
+                # Убеждаемся, что pts3d является массивом numpy
+                pts3d = np.array(pts3d) if isinstance(pts3d, list) else pts3d
                 pts3d = similar_transform(pts3d, roi_box, size)
             else:
                 pts3d = R @ (self.u_base + self.w_shp_base @ alpha_shp + self.w_exp_base @ alpha_exp). \

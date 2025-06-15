@@ -1,0 +1,2 @@
+"Путь к папке с фото (например, /Users/victorkhudyakov/nn/3DDFA2/input)",output,flag,username,timestamp
+/Users/victorkhudyakov/nn/3DDFA2/input,"{""headers"": [""file"", ""yaw"", ""pitch"", ""roll"", ""error""], ""data"": [[""01_01_87.jpg"", 6.433753317359563, 10.877661258483723, -2.180599644404866, """"], [""01_01_75.jpg"", 2.258282133661702, 6.402137652002372, 2.217034147097558, """"]], ""metadata"": {""display_value"": null, ""styling"": null}}",,,2025-06-13 12:51:27.961725

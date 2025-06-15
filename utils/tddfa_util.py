@@ -27,7 +27,7 @@ def str2bool(v):
 
 
 def load_model(model, checkpoint_fp):
-    checkpoint = torch.load(checkpoint_fp, map_location=lambda storage, loc: storage)['state_dict']
+    checkpoint = torch.load(checkpoint_fp, map_location=lambda storage, loc: storage, weights_only=False)['state_dict']
     model_dict = model.state_dict()
     # because the model is trained by multiple gpus, prefix module should be removed
     for k in checkpoint.keys():

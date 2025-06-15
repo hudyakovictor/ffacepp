@@ -1,0 +1,21 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Краткий отчет анализа лицевой идентичности</title>
+    <meta charset="utf-8">
+</head>
+<body>
+    <h1>Краткий отчет</h1>
+    <p>Это краткое резюме анализа, сгенерировано {{ generation_time }}.</p>
+    <p>Всего изображений: {{ report_data.statistics.total_images }}</p>
+    <p>Средняя аутентичность: {{ "%.2f"|format(report_data.statistics.avg_authenticity) }}</p>
+    <h3>Ключевые выводы:</h3>
+    <ul>
+    {% for summary in insights.summary %}
+        <li>{{ summary }}</li>
+    {% endfor %}
+    </ul>
+</body>
+</html>
+        

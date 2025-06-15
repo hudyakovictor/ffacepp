@@ -11,9 +11,9 @@ cd ../..
 ```
 """
 
-import sys
+# import sys # Удаляем импорт sys
 
-sys.path.append('..')
+# sys.path.append('..') # Удаляем эту строку
 
 import os.path as osp
 import cv2
@@ -28,9 +28,9 @@ class TrianglesMeshRender(object):
     def __init__(
             self,
             clibs,
-            light=(0, 0, 5),
-            direction=(0.6, 0.6, 0.6),
-            ambient=(0.3, 0.3, 0.3)
+            light=CTYPES_RENDER_LIGHTING_CONFIG['light'], # Используем константу
+            direction=CTYPES_RENDER_LIGHTING_CONFIG['direction'], # Используем константу
+            ambient=CTYPES_RENDER_LIGHTING_CONFIG['ambient'] # Используем константу
     ):
         if not osp.exists(clibs):
             raise Exception(f'{clibs} not found, please build it first, by run '
@@ -83,7 +83,8 @@ def render(img, ver_lst, tri, alpha=0.6, show_flag=False, wfp=None, with_bg_flag
         cv2.imwrite(wfp, res)
         print(f'Save visualization result to {wfp}')
 
-    if show_flag:
+    if show_flag: # Опциональное отображение
+        from utils.functions import plot_image # Импорт внутри функции
         plot_image(res)
 
     return res
