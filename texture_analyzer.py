@@ -144,7 +144,7 @@ class TextureAnalyzer:
         
         # ИСПРАВЛЕНО: Параметры Gabor согласно правкам
         self.gabor_params = {
-            "orientations": [0, 45, 90, 135],  # в градусах
+            "orientations": np.linspace(0, 180, 11, endpoint=False),
             "frequencies": [0.1, 0.2, 0.3, 0.4]
         }
         
@@ -240,11 +240,23 @@ class TextureAnalyzer:
             
             zones = {}
             
+            # Вычисление высоты лица для адаптивного расширения лба (пункт 21)
+            # Используем точки 8 (подбородок) и 27 (переносица) для определения высоты лица
+            # face_height = np.linalg.norm(landmarks[8] - landmarks[27])
+            
+            # Альтернатива: использовать BBox всего лица для более надежной высоты
+            min_x, min_y = np.min(landmarks[:, 0]), np.min(landmarks[:, 1])
+            max_x, max_y = np.max(landmarks[:, 0]), np.max(landmarks[:, 1])
+            face_bbox_height = max_y - min_y
+            
+            # Определяем относительное расширение (например, 15% от высоты лица)
+            forehead_expansion_px = int(face_bbox_height * 0.15) # 15% от высоты BBox лица
+            
             # Лоб (forehead) - точки 17-26
             forehead_points = landmarks[17:27]  # Брови
-            # Расширение области лба вверх
+            # Расширение области лба вверх (ИСПРАВЛЕНО: пункт 21)
             forehead_top = forehead_points.copy()
-            forehead_top[:, 1] -= 30  # Смещение вверх
+            forehead_top[:, 1] -= forehead_expansion_px  # Смещение вверх
             forehead_zone = np.vstack([forehead_top, forehead_points[::-1]])
             zones["forehead"] = forehead_zone[:, :2].astype(np.int32)
             
@@ -272,7 +284,7 @@ class TextureAnalyzer:
             chin_points = landmarks[6:11]
             # Расширение области подбородка вниз
             chin_bottom = chin_points.copy()
-            chin_bottom[:, 1] += 20  # Смещение вниз
+            chin_bottom[:, 1] += int(face_bbox_height * 0.05)  # Смещение вниз, например, 5% от высоты лица
             chin_zone = np.vstack([chin_points, chin_bottom[::-1]])
             zones["chin"] = chin_zone[:, :2].astype(np.int32)
             
@@ -490,101 +502,89 @@ class TextureAnalyzer:
 
     def calculate_gabor_responses(self, image_region: np.ndarray) -> Dict[str, Any]:
         """
-        ИСПРАВЛЕНО: Расчет Gabor responses
-        Согласно правкам: правильные ориентации и частоты
+        ИСПРАВЛЕНО: Расчет Gabor responses (11 ориентаций, 4 частоты)
         """
         try:
             logger.info("Расчет Gabor responses")
-            
             gabor_results = {}
-            
-            # Преобразование к float32
             if image_region.dtype != np.float32 and image_region.dtype != np.float64:
                 image_region = image_region.astype(np.float32) / 255.0
-            
-            # ИСПРАВЛЕНО: Параметры Gabor согласно правкам
-            orientations = self.gabor_params["orientations"]  # [0, 45, 90, 135]
-            frequencies = self.gabor_params["frequencies"]    # [0.1, 0.2, 0.3, 0.4]
-            
+            orientations = self.gabor_params["orientations"]
+            frequencies = self.gabor_params["frequencies"]
             for theta in orientations:
                 for freq in frequencies:
-                    # ИСПРАВЛЕНО: Создание Gabor kernel
+                    current_sigma = 0.56 / freq if freq > 0 else 1.0
                     kernel = np.real(gabor_kernel(
                         frequency=freq, 
                         theta=np.radians(theta), 
-                        sigma_x=1.0, 
-                        sigma_y=1.0
+                        sigma_x=current_sigma,
+                        sigma_y=current_sigma
                     ))
-                    
-                    # Свертка с изображением
                     filtered_image = convolve(image_region, kernel, mode='nearest')
-                    
-                    # Метрики Gabor response
-                    gabor_results[f"gabor_theta{theta}_freq{freq}"] = {
+                    gabor_results[f"gabor_theta{theta:.1f}_freq{freq}"] = {
                         "mean": float(np.mean(filtered_image)),
                         "std": float(np.std(filtered_image)),
                         "energy": float(np.sum(filtered_image**2))
                     }
-            
-            # ИСПРАВЛЕНО: Агрегированные метрики
             all_energies = [response["energy"] for response in gabor_results.values()]
             gabor_results["gabor_total_energy"] = float(np.sum(all_energies))
             gabor_results["gabor_mean_energy"] = float(np.mean(all_energies))
             gabor_results["gabor_energy_std"] = float(np.std(all_energies))
-            
             logger.info(f"Gabor responses рассчитаны для {len(orientations)}x{len(frequencies)} комбинаций")
             return gabor_results
-            
         except Exception as e:
             logger.error(f"Ошибка расчета Gabor responses: {e}")
             return {}
 
     def calculate_fourier_spectrum(self, image_region: np.ndarray) -> Dict[str, Any]:
         """
-        ИСПРАВЛЕНО: Расчет Fourier spectrum
-        Согласно правкам: spectral centroid, rolloff, dominant frequency
+        ИСПРАВЛЕНО: Расчет Fourier spectrum + FFT пики 0.15, 0.3, 0.6
         """
         if image_region.size == 0 or image_region.ndim == 0:
             logger.warning("calculate_fourier_spectrum: Пустой или невалидный регион изображения")
             return {
                 "spectral_centroid": 0.0,
                 "spectral_rolloff": 0.0,
-                "dominant_frequency": 0
+                "dominant_frequency": 0,
+                "fft_peaks": {0.15: 0.0, 0.3: 0.0, 0.6: 0.0}
             }
-        
         try:
             logger.info("Расчет Fourier spectrum")
-            
-            # 2D FFT
             fourier = np.fft.fft2(image_region)
             fourier_shifted = np.fft.fftshift(fourier)
             magnitude_spectrum = np.abs(fourier_shifted)
-            
-            # ИСПРАВЛЕНО: Проверка на нулевой спектр
             if np.sum(magnitude_spectrum) == 0:
                 logger.warning("calculate_fourier_spectrum: Нулевой спектр магнитуд")
                 return {
                     "spectral_centroid": 0.0,
                     "spectral_rolloff": 0.0,
-                    "dominant_frequency": 0
+                    "dominant_frequency": 0,
+                    "fft_peaks": {0.15: 0.0, 0.3: 0.0, 0.6: 0.0}
                 }
-            
-            # ИСПРАВЛЕНО: Расчет спектральных метрик
+            # FFT пики на частотах 0.15, 0.3, 0.6
+            h, w = magnitude_spectrum.shape
+            ky = np.fft.fftfreq(h)
+            kx = np.fft.fftfreq(w)
+            kgrid = np.sqrt(np.add.outer(ky**2, kx**2))
+            peaks = {}
+            for target in [0.15, 0.3, 0.6]:
+                mask = (kgrid > target-0.01) & (kgrid < target+0.01)
+                peaks[target] = float(magnitude_spectrum[mask].mean()) if np.any(mask) else 0.0
             spectral_metrics = {
                 "spectral_centroid": self.calculate_spectral_centroid(magnitude_spectrum),
                 "spectral_rolloff": self.calculate_spectral_rolloff(magnitude_spectrum),
-                "dominant_frequency": self.find_dominant_frequency(magnitude_spectrum)
+                "dominant_frequency": self.find_dominant_frequency(magnitude_spectrum),
+                "fft_peaks": peaks
             }
-            
             logger.info("Fourier spectrum рассчитан успешно")
             return spectral_metrics
-            
         except Exception as e:
             logger.error(f"Ошибка расчета Fourier spectrum: {e}")
             return {
                 "spectral_centroid": 0.0,
                 "spectral_rolloff": 0.0,
-                "dominant_frequency": 0
+                "dominant_frequency": 0,
+                "fft_peaks": {0.15: 0.0, 0.3: 0.0, 0.6: 0.0}
             }
 
     def calculate_spectral_centroid(self, magnitude: np.ndarray) -> float:

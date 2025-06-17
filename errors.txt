@@ -1,0 +1,1111 @@
+core_config.VIEW_CONFIGS не содержит ключа STANDARD_PROFILE_HEIGHT = 140 px, обязательного для профиля.
+
+В core_config.get_view_configs() отсутствует параметр target_angles = (0, ±85, 0) для Profile-ракурса.
+
+core_config.get_chronological_analysis_parameters() возвращает confidence_threshold = 0.8 вместо 0.85.
+
+core_config.auto_calibrate_thresholds() не учитывает aging_tolerance_per_year = 0.02 при пересчёте порогов.
+
+core_config.validate_config_integrity() не проверяет наличие всех 15 метрик в get_identity_signature_metrics().
+
+data_manager.parse_date_from_filename() не конвертирует год «99» в 1999, что нарушает правило эпохи 1999-2005.
+
+data_manager.create_master_chronological_index() не добавляет поле age_on_date, требуемое для моделей старения.
+
+data_manager.validate_image_quality_for_analysis() не возвращает blur_detection_result, предусмотренный ТЗ.
+
+data_manager.detect_temporal_gaps_and_patterns() не использует max_gap_days = 180 при поиске разрывов.
+
+data_manager.auto_parse_historical_events() отсутствует доступ к медицинским процедурам (hospitalization_events).
+
+face_3d_analyzer.initialize_3ddfa_components() загружает model='mobilenet0.25' вместо mb1_120x120.yml.
+
+face_3d_analyzer.extract_68_landmarks_with_confidence() не возвращает confidence_scores отдельным массивом.
+
+face_3d_analyzer.extract_dense_surface_points() выдаёт 32 768 точек вместо требуемых 38 000.
+
+face_3d_analyzer.determine_precise_face_pose() не возвращает roll_angle в градусах, сохраняет радианы.
+
+face_3d_analyzer.normalize_landmarks_by_pose_category() не исключает невидимые точки по visibility_mask.
+
+face_3d_analyzer.calculate_comprehensive_shape_error() не выводит mouth_region_error, необходимый для Level 2-5.
+
+face_3d_analyzer.detect_facial_asymmetry_patterns() не различает natural_vs_surgical коэффициенты.
+
+face_3d_analyzer.adaptive_landmark_extraction() игнорирует quality_score < 0.6, требуемый для fallback-режима.
+
+face_3d_analyzer.validate_landmark_consistency() не применяет временной фильтр smoothing_window = 5 кадров.
+
+embedding_analyzer.initialize_insightface_model() загружает weights fp16, тогда как Buffalo_L требует fp32.
+
+embedding_analyzer.extract_512d_face_embedding() не нормализует вектор на L2, как предписывает InsightFace.
+
+embedding_analyzer.calculate_embedding_distances_matrix() использует metric='euclidean' вместо 'cosine'.
+
+embedding_analyzer.perform_identity_clustering() допускает min_samples = 2, должно быть 3.
+
+embedding_analyzer.build_identity_timeline() не фиксирует gaps >90 дней как потенциальные «смены».
+
+embedding_analyzer.detect_embedding_anomalies_by_dimensions() не возвращает severity_score для каждой зоны.
+
+embedding_analyzer.calculate_identity_confidence_score() не учитывает cluster_std при расчётах.
+
+embedding_analyzer.analyze_cluster_temporal_stability() не вычисляет median_gap_length, требуемый ТЗ.
+
+embedding_analyzer.ensemble_embedding_analysis() отсутствует fusion_strategy='mean-cosine'.
+
+embedding_analyzer.detect_embedding_drift() не сравнивает c baseline_embeddings_1999-2001.
+
+texture_analyzer.initialize_texture_analysis_tools() не создаёт Gabor-фильтры частот 0.1-0.4.
+
+texture_analyzer.analyze_skin_texture_by_zones() не применяет LBP radius = 3, n_points = 24 uniform.
+
+texture_analyzer.calculate_material_authenticity_score() игнорирует диапазон entropy 6.2-7.8 для натуральной кожи.
+
+texture_analyzer.classify_mask_technology_level() не учитывает breakthrough_year = 2022 для Level 5-upgrade.
+
+texture_analyzer.detect_texture_transition_artifacts() не вычисляет gradient_magnitude_threshold = 25.
+
+texture_analyzer.analyze_pore_structure_authenticity() не возвращает pore_circularity_score.
+
+texture_analyzer.calculate_spectral_material_signature() не ищет пики FFT 0.15, 0.3, 0.6.
+
+temporal_analyzer.build_medical_aging_model() применяет elasticity_loss 0.008 вместо 0.01-0.02.
+
+temporal_analyzer.calculate_putin_age_on_each_date() делит на 365, а не 365.25 для високосных лет.
+
+temporal_analyzer.predict_expected_metrics_for_age() игнорирует skull_stability_after_age = 25.
+
+temporal_analyzer.detect_temporal_anomalies_in_metrics() использует z-score > 3 вместо 2.5.
+
+temporal_analyzer.analyze_identity_switching_patterns() не проверяет модальный интервал 90-120 дней.
+
+temporal_analyzer.correlate_anomalies_with_medical_events() не исключает «официальные отпуска» из гипотез.
+
+temporal_analyzer.seasonal_decomposition_analysis() отсутствуют годовые компоненты period = 12.
+
+anomaly_detector.apply_bayesian_identity_analysis() использует prior = 0.9, должно быть 0.5.
+
+anomaly_detector.perform_cascade_verification() не прерывает процесс при geometry_score < 0.3.
+
+anomaly_detector.calculate_identity_authenticity_score() применяет веса 0.25/0.25/0.25/0.25 вместо 0.3/0.3/0.2/0.2.
+
+anomaly_detector.detect_surgical_intervention_evidence() не проверяет отёчность 2-4 недели в метриках.
+
+anomaly_detector.perform_cross_source_verification() не возвращает cross_source_consistency_score.
+
+metrics_calculator.calculate_identity_signature_for_pose() не маркирует метрики названиями, только массив.
+
+metrics_calculator.calculate_cranial_stability_metrics() пропускает orbital_depth_ratio.
+
+metrics_calculator.bootstrap_metric_confidence() использует n_bootstrap = 200, нужно ≥1000.
+
+metrics_calculator.detect_metric_outliers() применяет IQR вместо z-score ±2.5.
+
+medical_validator.validate_aging_consistency_for_identity() не анализирует tissue_sagging_per_year = 1-2 мм.
+
+medical_validator.check_bone_structure_immutability() не сравнивает temporal_bone_angles с базовой линией.
+
+medical_validator.exclude_surgical_hypotheses_by_timeline() допускает операции через 3 месяца, минимум – 6.
+
+gradio_interface.setup_mask_detection_dashboard() не выводит gr.Alert при final_authenticity < 0.3.
+
+core_config.get_view_configs() не возвращает reference_points для Frontal-Edge в виде [27, 30, visible_eye], тогда как именно эта тройка требуется спецификацией.
+
+В core_config VIEW_CONFIGS отсутствует ключ STANDARD_NOSE_EYE = 45 px, обозначенный как масштаб для Frontal-Edge-ракурса.
+
+Функция core_config.get_mask_detection_thresholds() не содержит поля thickness для каждого уровня масок, хотя оно описано в ТЗ (3-5 мм / 2-3 мм / 1-2 мм / <1 мм / 0.5 мм).
+
+core_config.validate_config_integrity() не проверяет, что confidence_threshold = 0.85 ровно, как зафиксировано в get_chronological_analysis_parameters().
+
+core_config.auto_calibrate_thresholds() не пересчитывает shape_error-порог в зависимости от technology_upgrade_factor для breakthrough_years 2008 / 2014 / 2019 / 2022.
+
+data_manager.parse_date_from_filename() интерпретирует год «70–98» как 1970–1998, однако допустимый диапазон файлов начинается с 1999-го.
+
+data_manager.create_master_chronological_index() не заполняет поле events_correlation_dict, требуемое для дальнейшей корреляции с историческими событиями.
+
+data_manager.validate_image_quality_for_analysis() не возвращает lighting_quality, а это обязательный элемент списка проблем.
+
+data_manager.correlate_with_historical_events() не помечает периоды «длительное отсутствие» (более 20 дней), указанные в ТЗ.
+
+data_manager.detect_temporal_gaps_and_patterns() не выводит список modal_interval_values, нужных temporal_analyzer для фрактального анализа.
+
+data_manager.auto_parse_historical_events() отсутствует altogether, хотя спецификация требует автопарсинг внешних источников.
+
+data_manager.create_data_quality_report() не считает blur_score < 100 как критическое предупреждение, прописанное в разделе «качество изображения».
+
+face_3d_analyzer.initialize_3ddfa_components() не проверяет наличие модели FaceBoxes, обязательной для детекции лиц перед 3DDFA-V2.
+
+face_3d_analyzer.extract_68_landmarks_with_confidence() не отбрасывает невидимые точки по visibility_mask > MIN_VISIBILITY_Z.
+
+face_3d_analyzer.extract_dense_surface_points() не выводит индексы точек поверхности, хотя они нужны detect_texture_transition_artifacts().
+
+face_3d_analyzer.determine_precise_face_pose() возвращает категорию «Unknown» при yaw = 15°, однако по ТЗ 15° уже относится к Frontal-Edge.
+
+face_3d_analyzer.normalize_landmarks_by_pose_category() использует одинаковый scale_factor для всех ракурсов, а не специализированные STANDARD_* значения.
+
+face_3d_analyzer.calculate_identity_signature_metrics() не вычисляет jaw_line_angle, входящий в список 15 базовых метрик.
+
+face_3d_analyzer.calculate_comprehensive_shape_error() не выводит zone-wise errors (nose_region_error, mouth_region_error) по отдельности.
+
+face_3d_analyzer.analyze_cranial_bone_structure() не считает orbital_depth, описанный в блоке неизменных метрик после 25 лет.
+
+face_3d_analyzer.detect_facial_asymmetry_patterns() не различает surgical_asymmetry_indicators, необходимые для исключения операций.
+
+face_3d_analyzer.adaptive_landmark_extraction() не включает fallback-режим, когда quality_score < 0.6, требуемый ТЗ.
+
+face_3d_analyzer.validate_landmark_consistency() не проверяет smoothing_window = 5 кадров для временной плавности.
+
+embedding_analyzer.initialize_insightface_model() загружает модель fp16, хотя Buffalo_L должен работать в fp32 режиме.
+
+embedding_analyzer.extract_512d_face_embedding() не возвращает extraction_confidence, обязательный в описании функции.
+
+embedding_analyzer.calculate_embedding_distances_matrix() не фильтрует пары с extraction_confidence < 0.9, как рекомендовано.
+
+embedding_analyzer.perform_identity_clustering() выводит cluster_centers без cluster_std, нарушая формат возвращаемых данных.
+
+embedding_analyzer.build_identity_timeline() не фиксирует gaps длиннее max_gap_days = 180 как «отсутствие».
+
+embedding_analyzer.detect_embedding_anomalies_by_dimensions() не возвращает severity_score, требуемый для дальнейшей верификации.
+
+embedding_analyzer.calculate_identity_confidence_score() не учитывает appearances_count ≥ min_appearance_count = 3.
+
+embedding_analyzer.analyze_cluster_temporal_stability() не вычисляет standard_deviation_of_gaps, указанное в ТЗ.
+
+embedding_analyzer.ensemble_embedding_analysis() отсутствует механизм fusion_strategy = 'mean-cosine'.
+
+embedding_analyzer.detect_embedding_drift() не сравнивает c baseline_embeddings_1999-2001, как оговорено.
+
+texture_analyzer.initialize_texture_analysis_tools() не подготавливает FFT-анализ для частот 0.15 / 0.3 / 0.6.
+
+texture_analyzer.analyze_skin_texture_by_zones() не нормализует LBP_histograms на 256 бинов, что нарушает метод uniform-LBP.
+
+texture_analyzer.calculate_material_authenticity_score() не учитывает диапазон entropy 4.5-5.5 для искусственных материалов.
+
+texture_analyzer.classify_mask_technology_level() игнорирует technology_upgrade_factor = 1.5 для breakthrough_years.
+
+texture_analyzer.detect_texture_transition_artifacts() не применяет gradient_magnitude_threshold = 25, прописанный в требованиях.
+
+texture_analyzer.analyze_pore_structure_authenticity() не возвращает pore_circularity_score, описанный в спецификации.
+
+texture_analyzer._analyze_micro_wrinkles() отсутствует, хотя обязан возвращать mean_gabor_response и anisotropy_score.
+
+texture_analyzer._analyze_pore_distribution() не реализован, хотя должен выводить pore_size_variability.
+
+texture_analyzer.calculate_spectral_material_signature() не ищет пики FFT на частотах 0.15 / 0.3 / 0.6.
+
+temporal_analyzer.build_medical_aging_model() не использует elasticity_loss_per_year = 1-2 %, а фиксирует 0.8 %.
+
+temporal_analyzer._predict_single_metric() не добавляет sagging_offset = 1-2 мм / год после 40 лет.
+
+temporal_analyzer.detect_temporal_anomalies_in_metrics() применяет z-score > 3 вместо 2.5, указанного в алгоритме.
+
+temporal_analyzer._generate_temporal_anomaly_explanation() не формирует текст на основе pre-defined templates.
+
+temporal_analyzer.seasonal_decomposition_analysis() полностью отсутствует, хотя прописан как обязательный.
+
+temporal_analyzer.detect_change_points() не вызывает ruptures.Pelt(model='rbf'), требуемый для change-point detection.
+
+temporal_analyzer.calculate_temporal_stability_index() не учитывает fractal_dimension > 1.5 как признак сложной структуры.
+
+gradio_interface.update_aging_correlation_display() не визуализирует predicted_metrics versus actual_metrics на одной линии, как описано в ТЗ.
+
+core_config.get_age_adjusted_thresholds() не учитывает возраст Путина при динамической калибровке порогов аномалий, хотя функция должна корректировать thresholds в зависимости от current_age .
+
+core_config.validate_config_integrity() не проверяет наличие всех ключей VIEW_CONFIGS для четырёх ракурсов, что нарушает требования к целостности конфигурации .
+
+core_config.auto_calibrate_thresholds() не использует historical_data для автонастройки порогов Level1–5 по эпохам, несмотря на описание метода .
+
+data_manager.auto_parse_historical_events() отсутствует логика парсинга медицинских процедур из внешних источников, лишая систему возможности исключать альтернативные объяснения .
+
+data_manager.create_data_quality_report() не формирует сводку по lighting_quality и face_visibility, что прописано в описании отчёта .
+
+face_3d_analyzer.adaptive_landmark_extraction() игнорирует fallback на более простую модель при quality_score <0.6, хотя метод должен адаптироваться к качеству изображения .
+
+face_3d_analyzer.validate_landmark_consistency() не реализует проверку smoothness во временном ряду landmarks_sequence, хотя предусмотрена фильтрация по окну в 5 кадров .
+
+embedding_analyzer.ensemble_embedding_analysis() не объединяет результаты различных стратегий, тогда как должна повышать надёжность детекции кластеров .
+
+embedding_analyzer.detect_embedding_drift() не сравнивает текущие эмбеддинги с baseline_embeddings_1999–2001, что необходимо для выявления дрейфа .
+
+texture_analyzer.adaptive_texture_analysis() не учитывает lighting_conditions при анализе, хотя спецификация требует адаптивного подхода .
+
+texture_analyzer.calculate_texture_authenticity_score() отсутствует, несмотря на упоминание метода вычисления итогового texture_score .
+
+texture_analyzer._analyze_micro_wrinkles() не вызывается нигде в модуле, хотя должна быть частью детального анализа текстуры .
+
+texture_analyzer._analyze_pore_distribution() не возвращает pore_density, хотя функция декларативно обязана выдавать этот параметр .
+
+temporal_analyzer.seasonal_decomposition_analysis() не реализована, лишая анализ сезонных колебаний метрик .
+
+temporal_analyzer.detect_change_points() не использует ruptures.Pelt(model='rbf'), хотя должна автоматически выявлять change points .
+
+temporal_analyzer.calculate_temporal_stability_index() не учитывает fractal_dimension из описания метода, что нарушает спецификацию .
+
+anomaly_detector.analyze_mask_technology_evolution() не реализован, несмотря на необходимость отслеживать скачки технологий масок в breakthrough_years .
+
+anomaly_detector._calculate_metrics_consistency() не вызывается в cascade_verification или cross_source_verification, хотя должна оценивать согласованность метрик .
+
+anomaly_detector._generate_cross_source_explanation() отсутствует, но необходима для текстового описания кросс-источниковых расхождений .
+
+anomaly_detector.validate_identity_consistency() не проверяет постоянство ключевых метрик во времени, хотя метод описан в ТЗ .
+
+anomaly_detector.ensemble_anomaly_detection() не объединяет выходы нескольких детекторов, как предусмотрено для повышения надёжности .
+
+anomaly_detector.auto_adjust_detection_sensitivity() не использует false_positive_rate для динамической настройки чувствительности, что нарушает описание метода .
+
+metrics_calculator.normalize_metrics_by_stable_references() не реализована, хотя должна исключать влияние масштаба и поворота по reference_points .
+
+metrics_calculator.calculate_inter_metric_correlations() не возвращает корреляционную матрицу, а лишь список парных коэффициентов, что не соответствует ТЗ .
+
+metrics_calculator.detect_metric_outliers() применяет IQR, тогда как по техническому заданию требуется z-score ±2.5 .
+
+metrics_calculator.calculate_metric_stability_score() не учитывает temporal_variance в расчёте stability_score, хотя метод требует анализа всей истории метрик .
+
+medical_validator.auto_generate_medical_report() отсутствует, хотя должен автоматически формировать медотчёт на основе validation_results .
+
+medical_validator.calculate_biological_plausibility_score() не реализована, несмотря на описание функции вычисления plausibility_score для изменений .
+
+medical_validator.validate_physiological_change_limits() не проверяет скорость изменений soft_tissue_metrics по допустимым медицинским нормам .
+
+gradio_interface.create_automated_dashboard() не настраивает предустановленные компоненты, хотя функция объявлена в модуле .
+
+gradio_interface.setup_notification_system() не инициализирует уведомления gr.Alert для критических аномалий, что требуется по ТЗ .
+
+gradio_interface.create_export_functionality() не создаёт кнопки экспорта в формате PDF/JSON, несмотря на описание .
+
+gradio_interface.create_main_dashboard() не группирует вкладки в нужном порядке: Хронология, Метрики, Маски, Экспертное заключение .
+
+gradio_interface.setup_identity_timeline_view() не отображает gr.DataFrame со статистикой по каждой личности, как указано в описании .
+
+gradio_interface.setup_metrics_comparison_view() не выводит gr.Heatmap корреляций между метриками, что противоречит ТЗ .
+
+gradio_interface.setup_mask_detection_dashboard() не показывает распределение уровней масок по годам в gr.BarPlot .
+
+gradio_interface.create_interactive_landmarks_visualization() не предоставляет возможность переключения между «до» и «после» нормализации landmarks .
+
+gradio_interface.setup_identity_comparison_matrix() не отображает gr.Heatmap кластеров, а лишь таблицу расстояний .
+
+gradio_interface.create_chronological_anomaly_timeline() не связывает аномалии с историческими событиями, хотя должна использовать correlate_with_historical_events .
+
+gradio_interface.setup_expert_analysis_tools() не включает gr.Code для отображения текущих параметров анализа .
+
+gradio_interface.create_final_verdict_dashboard() не выводит статистическую значимость p-value и доверительные интервалы .
+
+gradio_interface.update_aging_correlation_display() не накладывает predicted_metrics и actual_metrics на одном графике, нарушая требования визуализации .
+
+core_config.get_view_configs() не возвращает target_angles для Semi-Profile = (0,±50,0), хотя это описано в spec .
+
+data_manager.parse_date_from_filename() не поддерживает filenames с суффиксом «-N» для более чем девяти фото за день, игнорируя index .
+
+face_3d_analyzer.initialize_3ddfa_components() не проверяет наличие модели FaceBoxes, только GPU, что неполно соответствует ТЗ .
+
+face_3d_analyzer.extract_dense_surface_points() возвращает менее 38000 точек, несмотря на описание метода .
+
+embedding_analyzer.perform_identity_clustering() не возвращает outliers confidence_scores, хотя signature функции это предусмотрено .
+
+texture_analyzer.detect_texture_transition_artifacts() не анализирует резкие изменения градиента по контуру маски, как требует спецификация .
+
+temporal_analyzer.build_identity_appearance_timeline() не добавляет duration для каждого появления, теряя важную информацию о времени присутствия .
+
+anomaly_detector.calculate_identity_authenticity_score() игнорирует temporal_consistency вес 0.2, суммируя лишь geometry, embedding и texture, что нарушает формулу
+
+core_config не содержит константы MIN_VISIBILITY_Z, требуемой для отбраковки невидимых точек при нормализации landmarks.
+
+core_config.VIEW_CONFIGS не хранит ссылку на STANDARD_FACE_HEIGHT = 120 px для Semi-Profile-ракурса.
+
+core_config.get_view_configs() не возвращает reference_points = [36, Frontal-нормализации по межзрачковому расстоянию.
+
+core_config.get_identity_signature_metrics() ошибочно перечисляет 14 метрик вместо обязательных 15 (нет jaw_line_angle).
+
+core_config.get_mask_detection_thresholds() пропускает параметр thickness для каждого уровня масок, указанный в описании.
+
+core_config.get_chronological_analysis_parameters() не возвращает max_gap_days = 180 при сборке словаря.
+
+core_config.validate_config_integrity() не проверяет, что epsilon DBSCAN равен 0.35 как прописано в ТЗ.
+
+core_config.auto_calibrate_thresholds() игнорирует technology_upgrade_factor для breakthrough_years 2008/2014/2019/2022.
+
+data_manager.parse_date_from_filename() не учитывает високосный год при создании объекта datetime.
+
+data_manager.create_master_chronological_index() не сортирует изображения при совпадении времени съёмки, нарушая порядок хронологии.
+
+data_manager.validate_image_quality_for_analysis() не вычисляет noise_level, обязательный в списке проблем качества.
+
+data_manager.correlate_with_historical_events() не помечает дни официальных встреч как потенциально повышающие стресс-факторы съёмки.
+
+data_manager.detect_temporal_gaps_and_patterns() не ищет систематический интервал 90–120 дней для возможной замены лиц.
+
+data_manager.create_data_quality_report() формирует PDF, но не добавляет поле blur_score < 100 как критическое предупреждение.
+
+face_3d_analyzer.initialize_3ddfa_components() не загружает FaceBoxes перед 3DDFA, что прописано как prerequisite.
+
+face_3d_analyzer.extract_68_landmarks_with_confidence() не использует cv2.cornerSubPix для субпиксельной донастройки.
+
+face_3d_analyzer.extract_dense_surface_points() возвращает 32 768 точек вместо требуемых 38 000.
+
+face_3d_analyzer.determine_precise_face_pose() не выводит confidence углов ориентации, тогда как функция должна возвращать pose_confidence.
+
+face_3d_analyzer.normalize_landmarks_by_pose_category() не исключает landmarks с visibility < MIN_VISIBILITY_Z.
+
+face_3d_analyzer.calculate_comprehensive_shape_error() не рассчитывает eye_region_error отдельно, хотя это критический показатель маски.
+
+face_3d_analyzer.analyze_cranial_bone_structure() не выводит orbital_depth, входящий в набор неизменных метрик.
+
+face_3d_analyzer.detect_facial_asymmetry_patterns() не формирует surgical_asymmetry_indicators список.
+
+face_3d_analyzer.adaptive_landmark_extraction() не активирует fallback-модель при quality_score < 0.6.
+
+face_3d_analyzer.validate_landmark_consistency() не применяет фильтр smoothing_window = 5 кадров для временной плавности.
+
+embedding_analyzer.initialize_insightface_model() загружает antelopev2 вместо Buffalo_L/ResNet-100.
+
+embedding_analyzer.extract_512d_face_embedding() не возвращает extraction_confidence.
+
+embedding_analyzer.calculate_embedding_distances_matrix() использует метрику 'euclidean' вместо 'cosine'.
+
+embedding_analyzer.perform_identity_clustering() задаёт min_samples = 2 вместо 3.
+
+embedding_analyzer.build_identity_timeline() не фиксирует gaps > 180 дней как аномалии.
+
+embedding_analyzer.detect_embedding_anomalies_by_dimensions() игнорирует диапазоны 120-145 и 200-230.
+
+embedding_analyzer.calculate_identity_confidence_score() не учитывает appearances_count в формуле уверенности.
+
+embedding_analyzer.analyze_cluster_temporal_stability() не возвращает median_gap_length.
+
+embedding_analyzer.ensemble_embedding_analysis() полностью отсутствует.
+
+texture_analyzer.initialize_texture_analysis_tools() не инициализирует Gabor-фильтры частот 0.1–0.4.
+
+texture_analyzer.analyze_skin_texture_by_zones() не нормализует LBP-гистограммы до 256 бинов.
+
+texture_analyzer.calculate_material_authenticity_score() не проверяет энтропию 4.5–5.5 как маркер искусственных материалов.
+
+texture_analyzer.classify_mask_technology_level() не учитывает breakthrough_year 2022 для Level 5-upgrade.
+
+texture_analyzer.detect_texture_transition_artifacts() не использует gradient_magnitude_threshold = 25.
+
+texture_analyzer.analyze_pore_structure_authenticity() не выводит pore_circularity_score.
+
+texture_analyzer._analyze_micro_wrinkles() отсутствует вызов в основном анализе текстур.
+
+texture_analyzer.calculate_spectral_material_signature() не ищет пики FFT 0.15 / 0.3 / 0.6.
+
+temporal_analyzer.build_medical_aging_model() задаёт elasticity_loss = 0.008 вместо 0.01–0.02.
+
+temporal_analyzer.calculate_putin_age_on_each_date() делит возраст на 365, а не 365.25.
+
+temporal_analyzer.predict_expected_metrics_for_age() игнорирует skull_stability_after_age = 25.
+
+temporal_analyzer.detect_temporal_anomalies_in_metrics() использует z-score > 3 вместо 2.5.
+
+temporal_analyzer.seasonal_decomposition_analysis() не реализована, лишая анализа сезонных трендов.
+
+temporal_analyzer.detect_change_points() не вызывает ruptures.Pelt(model='rbf').
+
+anomaly_detector.apply_bayesian_identity_analysis() использует prior = 0.9 вместо 0.5.
+
+anomaly_detector.calculate_identity_authenticity_score() суммирует только geometry, embedding и texture, игнорируя temporal_score вес 0.2.
+
+gradio_interface.setup_notification_system() не выводит gr.Alert при final_authenticity < 0.3.
+
+core_config.get_view_configs() не возвращает MIN_VISIBILITY_Z, необходимый для фильтрации невидимых точек при нормализации landmarks.
+
+core_config.validate_config_integrity() не проверяет наличие STANDARD_IOD = 64 px в конфигурации Frontal-ракурса.
+
+core_config.auto_calibrate_thresholds() не пересчитывает entropy-пороги Level 1–5 с учётом technology_upgrade_factor = 1.5 для breakthrough_years.
+
+core_config.get_age_adjusted_thresholds() игнорирует aging_tolerance_per_year = 0.02 при калибровке shape_error-порогов.
+
+data_manager.parse_date_from_filename() не валидирует, что индекс «-N» не превышает 99 кадров за день, как ограничено ТЗ.
+
+data_manager.create_master_chronological_index() не заносит quality_score изображения в итоговый словарь, хотя он нужен temporal_analyzer для весов в модели.
+
+data_manager.validate_image_quality_for_analysis() не использует Laplacian-blur < 100 как критическое условие отбраковки.
+
+data_manager.detect_temporal_gaps_and_patterns() не измеряет fractal_dimension последовательности появлений, требуемый для расчёта Temporal Stability Index.
+
+data_manager.auto_parse_historical_events() не добавляет годы breakthrough_years в список технологических скачков, что мешает корреляции масок.
+
+face_3d_analyzer.initialize_3ddfa_components() не выдаёт предупреждение, если GPU-память < 4 ГБ, хотя это указано как минимальное требование.
+
+face_3d_analyzer.extract_68_landmarks_with_confidence() не проверяет, что mean(confidence_scores) ≥ 0.9 перед дальнейшими вычислениями.
+
+face_3d_analyzer.extract_dense_surface_points() не сохраняет индекс точек вокруг глаз для прицельного анализа eye_region_error.
+
+face_3d_analyzer.determine_precise_face_pose() не возвращает pose_confidence, хотя это прописано в сигнатуре функции.
+
+face_3d_analyzer.normalize_landmarks_by_pose_category() не применяет visibility_mask > MIN_VISIBILITY_Z для исключения скрытых точек.
+
+face_3d_analyzer.calculate_identity_signature_metrics() не сохраняет промежуточные координаты reference_points, требуемые metrics_calculator.
+
+face_3d_analyzer.calculate_comprehensive_shape_error() не нормализует ошибки на величину scale_factor, что делает shape_error несопоставимым между ракурсами.
+
+face_3d_analyzer.detect_facial_asymmetry_patterns() не вычисляет overall_asymmetry > 0.05 / 0.1 градации, описанные в ТЗ.
+
+face_3d_analyzer.adaptive_landmark_extraction() не снижает resolution входного кадра при quality_score < 0.4, как предписано для ускорения.
+
+face_3d_analyzer.validate_landmark_consistency() не проверяет discontinuity_index между кадрами > 3 % как индикатор возможной подмены.
+
+embedding_analyzer.initialize_insightface_model() не фиксирует random seed для воспроизводимости эмбеддингов.
+
+embedding_analyzer.extract_512d_face_embedding() не делает L2-нормализацию embedding_vector, что нарушает предпроцессинг InsightFace.
+
+embedding_analyzer.calculate_embedding_distances_matrix() не возвращает также евклидовые расстояния, требуемые medical_validator для хирургических гипотез.
+
+embedding_analyzer.perform_identity_clustering() не выводит intra_cluster_distances для оценки плотности кластера.
+
+embedding_analyzer.build_identity_timeline() не добавляет field longest_absence_days для дальнейшего анализа смены личности.
+
+embedding_analyzer.detect_embedding_anomalies_by_dimensions() не возвращает detailed_dimension_scores, нужные texture_analyzer для кросс-валидации.
+
+embedding_analyzer.calculate_identity_confidence_score() не учитывает cluster_std / intra_cluster_distances как фактор уверенности.
+
+embedding_analyzer.analyze_cluster_temporal_stability() не фиксирует modal_interval 90–120 дней как критический паттерн.
+
+embedding_analyzer.ensemble_embedding_analysis() не использует fusion_strategy = 'mean-cosine' из спецификации.
+
+embedding_analyzer.detect_embedding_drift() не задаёт baseline_period = 1999–2001 при сравнении.
+
+texture_analyzer.initialize_texture_analysis_tools() не активирует FFT-анализ нужных частот 0.15/0.3/0.6.
+
+texture_analyzer.analyze_skin_texture_by_zones() не делит изображение на четыре области согласно точкам landmarks, а использует фиксированное деление.
+
+texture_analyzer.calculate_material_authenticity_score() не сравнивает entropy диапазона 6.2–7.8 для natural_skin, что понижает чувствительность.
+
+texture_analyzer.classify_mask_technology_level() не проверяет date ∈ breakthrough_years для автоматического повышения уровня.
+
+texture_analyzer.detect_texture_transition_artifacts() не выводит gradient_map для визуализации швов в интерфейсе.
+
+texture_analyzer.analyze_pore_structure_authenticity() не использует high_res_regions ≥ 300 ppi, требуемые для анализа пор.
+
+texture_analyzer._analyze_micro_wrinkles() не возвращает anisotropy_score, необходимый для material_authenticity_score.
+
+texture_analyzer._analyze_pore_distribution() не вычисляет pore_size_variability, указанную в описании функции.
+
+texture_analyzer.calculate_spectral_material_signature() не нормализует спектр по максимальной амплитуде перед поиском пиков.
+
+texture_analyzer.adaptive_texture_analysis() не корректирует параметры LBP при poor_lighting, как предусматривает адаптивный режим.
+
+temporal_analyzer.build_medical_aging_model() не сохраняет coefficients для последующих вызовов predict_expected_metrics_for_age.
+
+temporal_analyzer.calculate_putin_age_on_each_date() не проверяет, что photo_date ≥ 1999-01-01, как ограничивает ТЗ.
+
+temporal_analyzer.predict_expected_metrics_for_age() не учитывает elasticity_coefficient = 1 − (age−40)*0.015 при age > 40.
+
+temporal_analyzer.detect_temporal_anomalies_in_metrics() не помечает rapid_change_indices при change_rate > 3*std_rate.
+
+temporal_analyzer.seasonal_decomposition_analysis() не задаёт period = 12 для годовой сезонности.
+
+temporal_analyzer.detect_change_points() не возвращает список change_points для дальнейшей визуализации.
+
+temporal_analyzer.calculate_temporal_stability_index() не включает fractal_dimension > 1.5 как индикатор сложной структуры.
+
+anomaly_detector.apply_bayesian_identity_analysis() не задаёт prior_same_person = 0.5 по умолчанию.
+
+anomaly_detector.perform_cascade_verification() не останавливает пайплайн при geometry_score < 0.3, нарушая принцип каскада.
+
+anomaly_detector.analyze_mask_technology_evolution() не обновляет quality_threshold на основе Level N → N+1 скачков.
+
+gradio_interface.create_final_verdict_dashboard() не выводит p-value и доверительный интервал, необходимые для экспертной оценки значимости
+
+core_config.get_view_configs() не возвращает параметр STANDARD_PROFILE_HEIGHT = 140 px, требуемый для Profile-ракурса.
+
+core_config.get_identity_signature_metrics() описывает только 14 метрик, отсутствует orbital_depth_ratio, входящий в bone_structure_signature.
+
+core_config.get_mask_detection_thresholds() не содержит поля thickness для каждого уровня масок, хотя оно зафиксировано в ТЗ.
+
+core_config.get_chronological_analysis_parameters() возвращает confidence_threshold = 0.8 вместо 0.85, указанного в спецификации.
+
+core_config.validate_config_integrity() не сверяет min_appearance_count = 3 с фактическим параметром data_manager, нарушая целостность настроек.
+
+core_config.auto_calibrate_thresholds() не увеличивает shape_error-порог на 1.5× для breakthrough_years 2008/2014/2019/2022, как предписано.
+
+core_config.get_age_adjusted_thresholds() игнорирует elasticity_loss_per_year = 0.02 при пересчёте порогов аномалий.
+
+data_manager.parse_date_from_filename() неправильно обрабатывает расширение «–N» c двузначным индексом > 09, хотя допустимо до 99 снимков в день.
+
+data_manager.create_master_chronological_index() не вычисляет поле longest_absence_days, необходимое temporal_analyzer для анализа пропусков.
+
+data_manager.validate_image_quality_for_analysis() не возвращает noise_level, обязательный в списке проблем качества.
+
+data_manager.correlate_with_historical_events() не помечает периоды официальных встреч как стресс-факторы съёмки, предусмотренные ТЗ.
+
+data_manager.detect_temporal_gaps_and_patterns() не вычисляет fractal_dimension последовательности появлений, требуемый для Temporal Stability Index.
+
+data_manager.auto_parse_historical_events() не добавляет breakthrough_years в результирующий словарь events_correlation_dict.
+
+face_3d_analyzer.initialize_3ddfa_components() не проверяет, что GPU-память ≥ 4 ГБ, минимально допустимое значение по спецификации.
+
+face_3d_analyzer.extract_68_landmarks_with_confidence() не делает проверку mean(confidence_scores) ≥ 0.9 перед дальнейшим анализом.
+
+face_3d_analyzer.extract_dense_surface_points() выдаёт < 38 000 точек, хотя требуется ровно 38 000 для детектирования швов масок.
+
+face_3d_analyzer.determine_precise_face_pose() не возвращает pose_confidence, обязательный в сигнатуре функции.
+
+face_3d_analyzer.normalize_landmarks_by_pose_category() не удаляет невидимые точки по условию MIN_VISIBILITY_Z, указанному в конфигурации.
+
+face_3d_analyzer.calculate_identity_signature_metrics() не сохраняет intermediate_reference_points для дальнейших модулей.
+
+face_3d_analyzer.calculate_comprehensive_shape_error() не делит zone-errors на scale_factor, нарушая сопоставимость ракурсов.
+
+face_3d_analyzer.detect_facial_asymmetry_patterns() не рассчитывает surgical_asymmetry_indicators для исключения операций.
+
+face_3d_analyzer.adaptive_landmark_extraction() не понижает разрешение кадра при quality_score < 0.4, как требует адаптивный режим.
+
+face_3d_analyzer.validate_landmark_consistency() не вычисляет discontinuity_index > 3 % между соседними кадрами.
+
+embedding_analyzer.initialize_insightface_model() не фиксирует random seed, что нарушает воспроизводимость эмбеддингов.
+
+embedding_analyzer.extract_512d_face_embedding() не возвращает extraction_confidence, предусмотренный спецификацией.
+
+embedding_analyzer.calculate_embedding_distances_matrix() не выводит parallel euclidean_distances для мед-валидации хирургии.
+
+embedding_analyzer.perform_identity_clustering() не возвращает intra_cluster_distances, необходимые для confidence-оценки.
+
+embedding_analyzer.build_identity_timeline() не хранит longest_gap_per_identity, препятствуя анализу исчезновений.
+
+embedding_analyzer.detect_embedding_anomalies_by_dimensions() не отдаёт detailed_dimension_scores по каждому подозрительному диапазону.
+
+embedding_analyzer.calculate_identity_confidence_score() игнорирует cluster_std как компонент формулы уверенности.
+
+embedding_analyzer.analyze_cluster_temporal_stability() не выводит modal_interval 90–120 дней, ключевой индикатор замен.
+
+embedding_analyzer.ensemble_embedding_analysis() отсутствует, хотя обязан использовать fusion_strategy = 'mean-cosine'.
+
+embedding_analyzer.detect_embedding_drift() не задаёт baseline_period = 1999–2001 для сравнения.
+
+texture_analyzer.initialize_texture_analysis_tools() не активирует FFT-анализ частот 0.15 / 0.3 / 0.6.
+
+texture_analyzer.analyze_skin_texture_by_zones() использует фиксированное деление кадра, а не landmarks-based зоны.
+
+texture_analyzer.calculate_material_authenticity_score() не проверяет entropy 6.2–7.8 для natural-skin, снижая точность.
+
+texture_analyzer.classify_mask_technology_level() не учитывает breakthrough_year 2022 для Level 5-upgrade.
+
+texture_analyzer.detect_texture_transition_artifacts() не выводит gradient_map, необходимый UI для визуализации швов.
+
+texture_analyzer.analyze_pore_structure_authenticity() не обрабатывает high_res_regions ≥ 300 ppi, как требует метод.
+
+texture_analyzer._analyze_micro_wrinkles() не возвращает anisotropy_score, входящий в материал-score.
+
+texture_analyzer._analyze_pore_distribution() не вычисляет pore_size_variability, обязательный параметр.
+
+texture_analyzer.calculate_spectral_material_signature() не нормализует спектр перед поиском характерных пиков.
+
+texture_analyzer.adaptive_texture_analysis() не меняет LBP-параметры при poor_lighting флагах.
+
+temporal_analyzer.build_medical_aging_model() не сохраняет coefficients для повторного использования при прогнозе.
+
+temporal_analyzer.calculate_putin_age_on_each_date() не проверяет, что photo_date ≥ 1999-01-01, как ограничивает ТЗ.
+
+temporal_analyzer.predict_expected_metrics_for_age() игнорирует elasticity_coefficient = 1 − (age−40)*0.015 при age > 40.
+
+temporal_analyzer.detect_temporal_anomalies_in_metrics() не помечает rapid_change_indices при change_rate > 3*std_rate.
+
+temporal_analyzer.seasonal_decomposition_analysis() отсутствует, лишая анализа годовой сезонности period = 12.
+
+temporal_analyzer.detect_change_points() не возвращает список change_points для визуализации в UI, как описано.
+
+anomaly_detector.apply_bayesian_identity_analysis() использует prior_same_person = 0.9 вместо 0.5, нарушая методологию
+
+core_config.get_view_configs() не содержит константы STANDARD_NOSE_EYE = 45 px для ракурса Frontal-Edge, что требуется для корректной нормализации по нос-глазному расстоянию.
+
+В тех же конфигурациях пропущен ключ reference_points=[27,30,видимый_глаз,видимый_рот] — без него невозможна точная центровка Frontal-Edge-кадров.
+
+core_config.get_identity_signature_metrics() возвращает только 5 показателей в skull_geometry_signature, тогда как спецификация требует 6.
+
+Указанная функция не группирует 15 метрик по трём категориям (6 + 6 + 6) — структуру, пропорции и костную подпись — нарушая формальный контракт API.
+
+core_config.get_mask_detection_thresholds() отсутствует поле thickness для каждого уровня масок, хотя оно явно перечислено в ТЗ.
+
+core_config.get_chronological_analysis_parameters() не экспортирует параметр min_appearance_count = 3, что критично для фильтрации шумовых кластеров.
+
+validate_config_integrity() не проверяет, что confidence_threshold строго ≥ 0.85, как закреплено в разделе хронологии.
+
+auto_calibrate_thresholds() не масштабирует пороги масок при technology_upgrade_factor = 1.5, заданном для breakthrough-годов 2008/2014/2019/2022.
+
+get_age_adjusted_thresholds() не ограничивает изменение порогов значением aging_tolerance_per_year = 0.02.
+
+data_manager.parse_date_from_filename() интерпретирует файл dd_mm_yy.jpg с годом «97», хотя анализ должен начинаться с 1999-го.
+
+При разборе названия снимка функция не возвращает индекс N при вариантах dd_mm_yy-N.jpg, поэтому дубли за день теряются.
+
+create_master_chronological_index() не добавляет ключ events_correlation_dict, нужный для корреляции с историческими событиями.
+
+validate_image_quality_for_analysis() игнорирует параметр face_visibility, что препятствует фильтрации частично закрытых лиц.
+
+Та же функция не выставляет флаг poor_lighting при превышении 10 % пересвета/недосвета, прописанного в ТЗ.
+
+correlate_with_historical_events() не отбраковывает даты официальных отпусков из дальнейшего медицинского анализа.
+
+detect_temporal_gaps_and_patterns() не вычисляет modal_interval_values, необходимые для фрактального анализа Temporal Stability Index.
+
+auto_parse_historical_events() не загружает госпитализации из внешних источников, нарушая требование о «медицинских процедурах».
+
+create_data_quality_report() пропускает метрику noise_level, требуемую для финального отчёта качества.
+
+initialize_3ddfa_components() не проверяет наличие файла mb1_120x120.yml, указанного как обязательная модель.
+
+extract_68_landmarks_with_confidence() не применяет cv2.cornerSubPix для уточнения координат до 0.1 px, что критически снижает точность.
+
+Коррекция осей ver[0,:] = -ver[0,:]; ver[1,:] = -ver[1,:] отсутствует, из-за чего фронтальные точки инвертированы.
+
+extract_dense_surface_points() извлекает 32 768 точек вместо требуемых 38 000, уменьшая разрешение детектора швов.
+
+determine_precise_face_pose() возвращает углы в радианах, а не в градусах, поскольку забыто умножение на 180/π.
+
+В той же функции не присваивается pose_category по правилам yaw-порогов 0-15/15-35/35-65/>65°.
+
+normalize_landmarks_by_pose_category() не использует маску visibility_mask > MIN_VISIBILITY_Z для фильтрации затенённых точек.
+
+При нормализации Frontal-Edge масштаб вычисляется не по STANDARD_NOSE_EYE, а по межзрачковому расстоянию, что даёт систематическую ошибку.
+
+calculate_identity_signature_metrics() пропускает метрику chin_projection_ratio, входящую в список 15-ти обязательных.
+
+calculate_comprehensive_shape_error() не выводит nose_region_error, поэтому маски с деформациями носа не детектируются.
+
+analyze_cranial_bone_structure() не вычисляет zygomatic_arch_width, который должен входить в неизменные после 25 лет параметры.
+
+detect_facial_asymmetry_patterns() не формирует список surgical_asymmetry_indicators, обязательный для исключения пост-операционных искажений.
+
+adaptive_landmark_extraction() не переключается на облегчённую модель при quality_score < 0.4, вопреки описанию адаптивного режима.
+
+validate_landmark_consistency() не применяет сглаживание по окну 5 кадров, нарушая требование временной плавности.
+
+initialize_insightface_model() загружает antelopev2, а спецификация жёстко предписывает Buffalo_L или ResNet-100.
+
+extract_512d_face_embedding() не возвращает extraction_confidence, что делает невозможным отбраковку сомнительных векторов.
+
+calculate_embedding_distances_matrix() использует евклидову метрику вместо обязательной косинусной для эмбеддингов.
+
+perform_identity_clustering() задан min_samples = 2, а должен быть 3 для подтверждения личности.
+
+build_identity_timeline() не сохраняет gaps > 180 дней как потенциальные «замены», нарушая протокол анализа замен.
+
+detect_embedding_anomalies_by_dimensions() проверяет только диапазон 45-67, игнорируя 120-145 и 200-230, что снижает чувствительность.
+
+calculate_identity_confidence_score() не учитывает appearances_count, хотя это ключевой фактор уверенности.
+
+ensemble_embedding_analysis() отсутствует, хотя обязан повышать надёжность с помощью fusion-стратегии mean-cosine.
+
+detect_embedding_drift() не сравнивает текущие векторы с baseline_embeddings_1999-2001, из-за чего дрейф не ловится.
+
+initialize_texture_analysis_tools() не создает Gabor-фильтры с ориентациями 11 и частотами 0.1-0.4.
+
+analyze_skin_texture_by_zones() использует radius=1 для LBP вместо требуемого radius=3, n_points=24, method='uniform'.
+
+calculate_material_authenticity_score() не проверяет пики LBP-гистограммы на позициях 15, 51, 85, 119, 153, 187, 221.
+
+classify_mask_technology_level() не повышает уровень при годах 2008/2014/2019/2022, нарушая логику эволюции технологий масок.
+
+detect_texture_transition_artifacts() не использует порог gradient_magnitude_threshold = 25 для выявления швов.
+
+analyze_pore_structure_authenticity() не возвращает pore_circularity_score, важный для отличия настоящей кожи от силикона.
+
+calculate_spectral_material_signature() не ищет характерные FFT-пики на частотах 0.15, 0.3, 0.6.
+
+build_medical_aging_model() фиксирует elasticity_loss = 0.008, а должен использовать диапазон 1-2 % в год после 40 лет.
+
+calculate_identity_authenticity_score() складывает веса как 0.25 / 0.25 / 0.25 / 0.25 вместо 0.3 / 0.3 / 0.2 / 0.2, нарушая утверждённую формулу подлинности
+
+core_config.get_view_configs() не публикует константу STANDARD_IOD как глобальный атрибут для использования внешними модулями.
+
+В том же методе отсутствует ключ MIN_VISIBILITY_Z, необходимый для фильтрации невидимых точек при нормализации landmarks.
+
+core_config.validate_config_integrity() не проверяет наличие полного списка reference_points для каждого ракурса, что нарушает формальный контракт API.
+
+core_config.auto_calibrate_thresholds() не пересчитывает entropy-пороги Level 1-5 после применения technology_upgrade_factor = 1.5 в breakthrough-годах.
+
+core_config.get_age_adjusted_thresholds() не ограничивает итоговое смещение порогов значением aging_tolerance_per_year = 0.02.
+
+core_config.get_mask_detection_thresholds() не возвращает параметр thickness в миллиметрах, хотя он зафиксирован для каждой эпохи масок.
+
+data_manager.parse_date_from_filename() не валидирует, что порядковый индекс «-N» не превышает 99 снимков в день, как указано в описании.
+
+В той же функции не обрабатывается формат имени файла dd_mm_yyyy.jpg, допустимый для снимков после 2010 года.
+
+data_manager.create_master_chronological_index() не добавляет флаг leap_year для последующего точного учёта високосных годов.
+
+Метод validate_image_quality_for_analysis() не вычисляет коэффициент контрастности, требуемый для полноценной оценки lighting_quality.
+
+data_manager.detect_temporal_gaps_and_patterns() не возвращает fractal_dimension, необходимый temporal_analyzer для индекса стабильности.
+
+auto_parse_historical_events() не загружает данные о госпитализациях из внешнего API, хотя это оговорено в ТЗ.
+
+create_data_quality_report() не включает поле face_visibility < 0.8 как критическое предупреждение качества.
+
+face_3d_analyzer.initialize_3ddfa_components() не генерирует исключение при отсутствии CUDA-устройства ≥ 4 ГБ, как требует спецификация.
+
+extract_68_landmarks_with_confidence() не усредняет confidence_scores для фиксации global_landmark_confidence ≥ 0.9 перед дальнейшими расчётами.
+
+extract_dense_surface_points() не сохраняет индексы точек в области рта, что препятствует анализу mouth_region_error.
+
+determine_precise_face_pose() не возвращает ошибку угловой оценки (pose_error), предусмотренную для контроля точности.
+
+normalize_landmarks_by_pose_category() не масштабирует координаты по STANDARD_PROFILE_HEIGHT для Profile-ракурса.
+
+calculate_identity_signature_metrics() пропускает метрику temple_width_ratio, входящую в skull_geometry_signature.
+
+calculate_comprehensive_shape_error() не корректирует ошибки на scale_factor, делая shape_error несопоставимым между ракурсами.
+
+analyze_cranial_bone_structure() не проверяет zygomatic_arch_width на отклонения > 2 %, как указано в медико-геометрических константах.
+
+detect_facial_asymmetry_patterns() не выводит коэффициент overall_asymmetry, обязательный для medical_validator.
+
+adaptive_landmark_extraction() не понижает частоту кадров при quality_score < 0.4 для ускорения обработки, как требует адаптивный режим.
+
+validate_landmark_consistency() не считает discontinuity_index между последовательными кадрами > 3 % критическим.
+
+initialize_insightface_model() не фиксирует random seed, нарушая требование воспроизводимости эмбеддингов.
+
+extract_512d_face_embedding() не возводит в норму L2-нормализацию вектора перед возвратом, что противоречит pipeline InsightFace.
+
+calculate_embedding_distances_matrix() не возвращает параллельно евклидовые расстояния, предусмотренные для медико-хирургических проверок.
+
+perform_identity_clustering() не публикует intra_cluster_distances, необходимые для расчёта confidence_scores.
+
+build_identity_timeline() не фиксирует longest_absence_days для последующего анализа смены лиц.
+
+detect_embedding_anomalies_by_dimensions() не вычисляет severity_score для каждой из трёх групп аномальных измерений.
+
+calculate_identity_confidence_score() игнорирует cluster_std как компонент формулы уверенности, снижая точность оценки.
+
+ensemble_embedding_analysis() не реализует fusion_strategy = 'mean-cosine', указанную в описании метода.
+
+detect_embedding_drift() не задаёт baseline_period = 1999-2001 при сравнении текущих эмбеддингов.
+
+initialize_texture_analysis_tools() не генерирует Gabor-фильтры частот 0.1-0.4, обязательные для многомасштабного анализа.
+
+analyze_skin_texture_by_zones() использует radius=1 для LBP вместо radius=3, n_points=24, method='uniform', закреплённых в ТЗ.
+
+calculate_material_authenticity_score() не сравнивает entropy 4.5-5.5 как маркер искусственных материалов, из-за чего маски Level 1 могут не детектироваться.
+
+classify_mask_technology_level() не повышает уровень при обнаружении breakthrough_year = 2022, нарушая логику эволюции.
+
+detect_texture_transition_artifacts() не выводит gradient_map для визуализации швов в интерфейсе Gradio.
+
+analyze_pore_structure_authenticity() не проверяет pore_density на превышение диапазона натуральной кожи 20-40 пор/мм².
+
+_analyze_micro_wrinkles() не возвращает anisotropy_score, входящий в итоговый texture_authenticity_score.
+
+calculate_spectral_material_signature() не нормализует спектр по максимальной амплитуде перед поиском FFT-пиков.
+
+adaptive_texture_analysis() не изменяет параметры LBP при poor_lighting, как требовала адаптивная логика.
+
+build_medical_aging_model() не сохраняет elasticity_coefficients для повторного использования при прогнозах.
+
+calculate_putin_age_on_each_date() не валидирует, что дата снимка ≥ 1999-01-01, как задаёт ограничение ТЗ.
+
+predict_expected_metrics_for_age() игнорирует skull_stability_after_age = 25 при расчёте костных метрик.
+
+detect_temporal_anomalies_in_metrics() не помечает rapid_change_indices при rate > 3×historical_std_rate, как описано в алгоритме.
+
+seasonal_decomposition_analysis() отсутствует, лишая систему сезонной корректировки метрик с period = 12.
+
+detect_change_points() не возвращает список change_points для визуализации в UI и последующей экспертизы.
+
+apply_bayesian_identity_analysis() использует prior_same_person = 0.9 вместо требуемого 0.5, что даёт завышенную априорную уверенность.
+
+perform_cross_source_verification() не возвращает cross_source_consistency_score, хотя он обязателен для финальной каскадной верификации
+
+report_generator.generate_pdf_report() не добавляет bootstrap-интервалы доверия, которые обязаны приходить из metrics_calculator.
+
+report_generator.export_json() не включает поле golden_ratio_deviation, предусмотренное итоговым отчётом.
+
+ui_components.create_mask_level_barplot() не визуализирует толщину маски в миллиметрах для каждого Level, требуемое UI-спецификацией.
+
+ui_components.generate_confidence_badge() окрашивает индикатор «зелёным» при authenticity > 0.6, хотя граница подлинности установлена ≥ 0.7.
+
+visualization_engine.render_landmark_overlay() не показывает reference_points ракурса, что мешает ручной верификации нормализации.
+
+visualization_engine.plot_shape_errors_by_zone() не выводит eye_region_error, критичный для масок Level 1-3.
+
+visualization_engine.draw_fractal_dimension_chart() отсутствует, хотя ТЗ требует демонстрацию сложности временной структуры аномалий.
+
+interactive_widgets.timeline_slider() не ограничивает выбор интервала 180 днями, установленными как max_gap_days.
+
+interactive_widgets.cluster_selector() не отображает cluster_confidence_score, обязательный по UI-описанию.
+
+interactive_widgets.anomaly_filter_checkbox() не содержит опции «Rapid metric change (> 3 × σ)», предусмотренной для экспресс-анализа.
+
+data_processing.preprocess_image_pipeline() пропускает этап CLAHE-контрастирования, требуемый для улучшения текстур кожи.
+
+data_processing.compute_blur_score() использует дисперсию Sobel вместо Laplacian, делая порог < 100 некорректным.
+
+data_processing.estimate_noise_level() не применяет σ-порог 30 для отбраковки шумных кадров, как предписано.
+
+data_processing.detect_skin_mask_hsv() не проверяет насыщенность S > 0.3, снижая точность сегментации кожи.
+
+data_processing.gamma_correction() фиксирует γ = 1.0, игнорируя автокоррекцию яркости, прописанную в пайплайне.
+
+data_manager.auto_parse_historical_events() не кеширует ответы внешних API, из-за чего возрастает число сетевых вызовов.
+
+data_manager.save_processed_images() не заносит pose_category в EXIF, хотя метаданные требуются для отладки.
+
+face_3d_analyzer.extract_68_landmarks_with_confidence() не прерывает обработку при mean(confidence)< 0.8, как требует фильтрация кадров.
+
+face_3d_analyzer.validate_landmark_consistency() не возвращает список индексов неконсистентных точек для дебага.
+
+face_3d_analyzer.detect_facial_asymmetry_patterns() не сравнивает natural_asymmetry_coefficients с surgical_threshold = 0.02.
+
+embedding_analyzer.calculate_embedding_distances_matrix() отдаёт float32, в то время как DBSCAN ожидает float64 для стабильности.
+
+embedding_analyzer.perform_identity_clustering() не логирует eps и min_samples, затрудняя репликацию результатов.
+
+embedding_analyzer.detect_embedding_anomalies_by_dimensions() не маркирует измерения по типу «geometry vs texture» в UI.
+
+texture_analyzer.initialize_texture_analysis_tools() не переводит изображение в LAB-пространство до расчёта LBP, как указано в методике.
+
+texture_analyzer.analyze_skin_texture_by_zones() возвращает абсолютные, а не нормализованные LBP-гистограммы, препятствуя межкадровому сравнению.
+
+texture_analyzer.detect_texture_transition_artifacts() не применяет морфологическую фильтрацию перед расчётом градиента.
+
+texture_analyzer.analyze_pore_structure_authenticity() анализирует участок 50×50 px, тогда как минимум требуется 100×100 px.
+
+texture_analyzer.calculate_spectral_material_signature() не переводит амплитуды FFT в лог-шкалу, что маскирует пики 0.15-0.6.
+
+temporal_analyzer.build_identity_appearance_timeline() игнорирует появления продолжительностью < 1 дня, что теряет краткие визиты.
+
+temporal_analyzer.detect_change_points() использует pen = 5 вместо рекомендованных 10 для алгоритма Pelt, вызывая ложные тревоги.
+
+temporal_analyzer.calculate_temporal_stability_index() не нормализует результат к диапазону 0-1, усложняя интерпретацию.
+
+anomaly_detector.perform_cascade_verification() передаёт geometry_score в диапазоне 0-100 вместо 0-1, ломая итоговую формулу.
+
+anomaly_detector.analyze_mask_technology_evolution() не упорядочивает уровни масок по дате, теряя логику апгрейда.
+
+anomaly_detector.detect_surgical_intervention_evidence() не сравнивает асимметрию уменьшения отёчности между половинами лица.
+
+anomaly_detector.ensemble_anomaly_detection() усредняет вероятности вместо majority_vote, снижая робастность.
+
+metrics_calculator.calculate_biometric_uniqueness_score() не включает bone_structure_signature, ограничившись пропорциями и геометрией.
+
+metrics_calculator.normalize_metrics_by_stable_references() не выполняет поворот координат вокруг center_point перед масштабом.
+
+metrics_calculator.calculate_inter_metric_correlations() не применяет коррекцию Bonferroni, увеличивая риск ложных выводов.
+
+metrics_calculator.bootstrap_metric_confidence() возвращает только доверительный интервал без p_value, требуемого отчётом.
+
+metrics_calculator.detect_metric_outliers() использует z-порог ±3 вместо требуемого ±2.5.
+
+medical_validator.validate_aging_consistency_for_identity() не учитывает tissue_sagging 1-2 мм/год после 40 лет.
+
+medical_validator.check_bone_structure_immutability() не сравнивает orbital_depth с baseline после 25 лет.
+
+medical_validator.analyze_soft_tissue_aging_patterns() не выводит коэффициент loss_of_elasticity в отчёт.
+
+medical_validator.exclude_surgical_hypotheses_by_timeline() допускает операции при 5-месячных интервалах вместо минимальных 6.
+
+medical_validator.calculate_biological_plausibility_score() не взвешивает изменения по длительности, считая их мгновенными.
+
+report_generator.compile_statistical_significance_section() опускает расчёт effect_size, обязательный для интерпретации t-теста.
+
+report_generator.insert_cross_source_analysis() не добавляет cross_source_consistency_score — ключевой KPI системы.
+
+gradio_interface.setup_metrics_comparison_view() не визуализирует heatmap inter_metric_correlations, хотя функция объявлена.
+
+gradio_interface.create_final_verdict_dashboard() не показывает 95 % confidence_interval, затрудняя экспертное решение.
+
+gradio_interface.setup_notification_system() триггерит alert при authenticity < 0.2, а критический порог маски установлен < 0.3
+
+core_config.get_view_configs() не содержит MIN_VISIBILITY_Z, без которого normalize_landmarks_by_pose_category не может отфильтровать невидимые точки.
+
+core_config.get_identity_signature_metrics() возвращает skull_geometry_signature длиной 5 вместо 6 метрик, отсутствует skull_depth_ratio.
+
+core_config.get_mask_detection_thresholds() не публикует поле thickness (мм) для каждого Level, требуемое для UI-графика масок.
+
+core_config.get_chronological_analysis_parameters() опускает параметр max_gap_days = 180, обязательный для temporal_analyzer.
+
+validate_config_integrity() не валидирует, что epsilon DBSCAN строго 0.35 и min_samples = 3.
+
+auto_calibrate_thresholds() не применяет technology_upgrade_factor = 1.5 к entropy-порогам при breakthrough_years.
+
+get_age_adjusted_thresholds() не снижает shape_error-порог при elasticity_loss 1–2 %/год после 40 лет.
+
+data_manager.parse_date_from_filename() игнорирует расширение «.jpeg», допустимое по дорожной карте ТЗ.
+
+create_master_chronological_index() не формирует поле quality_score, хотя validate_image_quality_for_analysis его вычисляет.
+
+validate_image_quality_for_analysis() не возвращает blur_score как отдельную метрику, требуемую data_quality_report.
+
+correlate_with_historical_events() не помечает дни лечения Covid-19 как медицинские события, указанные в расширении ТЗ.
+
+detect_temporal_gaps_and_patterns() не определяет modal_gap_interval (90–120 дней) для отчёта о систематических заменах.
+
+auto_parse_historical_events() не кэширует результаты, нарушая требование об офлайн-работе без сети.
+
+create_data_quality_report() не добавляет поле lighting_quality < 0.8 как предупреждение.
+
+initialize_3ddfa_components() не вызывает FaceBoxes перед 3DDFA_V2, прописанное как prerequisite.
+
+extract_68_landmarks_with_confidence() не сохраняет landmarks в формате float32, что снижает точность последующих вычислений.
+
+extract_dense_surface_points() не возвращает нормализованные z-координаты, обязательные для шов-детектора.
+
+determine_precise_face_pose() не выдаёт pose_confidence ≥ 0.9 порог, хотя метод должен фильтровать низкую точность.
+
+normalize_landmarks_by_pose_category() не пересчитывает scale_factor для зеркального Frontal-Edge (левый/правый поворот).
+
+calculate_identity_signature_metrics() пропускает jaw_angle_ratio, входящий в facial_proportions_signature.
+
+calculate_comprehensive_shape_error() не применяет weighting_eye = 2×, хотя глаза должны иметь повышенный вес.
+
+analyze_cranial_bone_structure() не сравнивает orbital_depth с baseline_1999, нарушая проверку bone_stability.
+
+detect_facial_asymmetry_patterns() не выводит natural_asymmetry_coefficients для последующей медицинской валидации.
+
+adaptive_landmark_extraction() не переключается на POPoS-fallback при confidence_scores < 0.8.
+
+validate_landmark_consistency() не подаёт alarming_flag, если discontinuity_index > 3 %.
+
+initialize_insightface_model() не загружает fp32 веса Buffalo_L, ограничиваясь fp16.
+
+extract_512d_face_embedding() не проверяет extraction_confidence >= 0.9 перед сохранением.
+
+calculate_embedding_distances_matrix() не обнуляет диагональ, что искажает кластерные расстояния.
+
+perform_identity_clustering() не возвращает outliers_ids, усложняя диагностику выбросов.
+
+build_identity_timeline() не вычисляет median_gap при подсчёте temporal_stability.
+
+detect_embedding_anomalies_by_dimensions() не классифицирует аномалии по трём типам (texture, geometry, lighting).
+
+calculate_identity_confidence_score() не нормирует score к диапазону 0–1, что ломает итоговую формулу подлинности.
+
+ensemble_embedding_analysis() отсутствует выбор стратегии fusion_strategy='mean-cosine' или 'median'.
+
+detect_embedding_drift() не возвращает drift_magnitude, указанную в отчёте.
+
+initialize_texture_analysis_tools() не конвертирует изображение в LAB-пространство до LBP-анализа.
+
+analyze_skin_texture_by_zones() не делит область глаз на верхнее/нижнее веко, требуемое для fine-grain анализа.
+
+calculate_material_authenticity_score() не использует Shannon_entropy округлённую до двух знаков для стабильности порогов.
+
+classify_mask_technology_level() не понижает уровень, если entropy > 7.8 при датах после 2021.
+
+detect_texture_transition_artifacts() не возврашает heatmap швов для UI-накладывания.
+
+analyze_pore_structure_authenticity() не проверяет pore_size_variability < 15 %, критерий натуральной кожи.
+
+_analyze_micro_wrinkles() не рассчитывает mean_orientation, нужную для anisotropy_score.
+
+calculate_spectral_material_signature() не фильтрует шум высоких частот (> 0.8) перед поиском пиков.
+
+adaptive_texture_analysis() не варьирует radius LBP в зависимости от lighting_conditions.
+
+build_medical_aging_model() не фиксирует baseline_metrics_1999 для дальнейших прогнозов.
+
+calculate_putin_age_on_each_date() не возвращает leap_year_flag, нарушая downstream-коррекции.
+
+predict_expected_metrics_for_age() не ограничивает nose_projection_ratio изменениями ≤ 0.5 мм/год.
+
+detect_temporal_anomalies_in_metrics() не формирует rapid_change_flag при change_rate > 3 × σ_rate.
+
+seasonal_decomposition_analysis() не выводит seasonal_component для визуализации.
+
+detect_change_points() использует pen = 5 вместо рекомендованного 10, что повышает ложные срабатывания.
+
+calculate_temporal_stability_index() не учитывает fractal_dimension > 1.5 как признак сложной структуры временного ряда
+
+core_config.get_view_configs() не экспортирует STANDARD_FACE_HEIGHT = 120 px для Semi-Profile-ракурса, поэтому normalize_landmarks_by_pose_category не может корректно масштабировать лицо.
+
+core_config.get_view_configs() отсутствует target_angles = (0, ±50, 0) для Semi-Profile, что нарушает сегментацию ракурсов.
+
+core_config.get_identity_signature_metrics() возвращает temple_width_ratio, но пропускает cheekbone_width_ratio, тем самым сокращая facial_proportions_signature до 5 метрик вместо 6.
+
+core_config.validate_config_integrity() не проверяет presence MIN_VISIBILITY_Z, требуемого фильтром невидимых точек.
+
+core_config.auto_calibrate_thresholds() игнорирует aging_tolerance_per_year = 0.02 при пересчёте shape_error-порогов.
+
+data_manager.parse_date_from_filename() не добавляет “0” к однозначному индексу «–N», вследствие чего сортировка файлов одного дня нарушается.
+
+data_manager.create_master_chronological_index() не вычисляет field “age_on_date” через division by 365.25, что занижает возраст после високосных годов.
+
+data_manager.validate_image_quality_for_analysis() не выявляет poor_lighting когда ≥10 % гистограммы лежит в крайних 5 % яркости, как требует pipeline качества.
+
+data_manager.correlate_with_historical_events() не проставляет medical_flag для «официальных госпитализаций», что делает exclude_surgical_hypotheses_by_timeline бесполезным.
+
+detect_temporal_gaps_and_patterns() не ищет modal_interval в диапазоне 90-120 дн., описанный как индикатор систематической замены лиц.
+
+face_3d_analyzer.initialize_3ddfa_components() не проверяет, что файл mb1_120x120.yml действительно загружен перед inference.
+
+extract_68_landmarks_with_confidence() не обнуляет Z-координаты для точек с confidence < 0.8, поэтому visibility_mask работает некорректно.
+
+extract_dense_surface_points() сохраняет точки в формате int16, тогда как shape_error требует float32 точность.
+
+determine_precise_face_pose() не возвращает roll_angle, нарушая сигнатуру (yaw, pitch, roll).
+
+normalize_landmarks_by_pose_category() использует фиксированный center_point = landmarks для всех ракурсов, игнорируя ракурс-специфические правила.
+
+calculate_identity_signature_metrics() рассчитывает skull_depth_ratio на основе Z-координат raw landmarks, а не нормализованных.
+
+calculate_comprehensive_shape_error() применяет RMSE ко всем точкам, но eye_region_error должен считаться только по 36-48.
+
+analyze_cranial_bone_structure() не переводит temporal_bone_angles из радиан в градусы, нарушая единицы измерения.
+
+detect_facial_asymmetry_patterns() не выводит surgical_asymmetry_indicators list, требуемый anomaly_detector.detect_surgical_intervention_evidence.
+
+validate_landmark_consistency() не вычисляет smoothing_window = 5 кадров и потому пропускает резкие скачки координат.
+
+embedding_analyzer.initialize_insightface_model() не проверяет, что model.input_size = 112×112, как требует align_face.
+
+extract_512d_face_embedding() не нормирует вектор L2, а downstream cosine_distance предполагает нормализацию.
+
+calculate_embedding_distances_matrix() не конвертирует float32→float64 перед pdist, что понижает точность DBSCAN.
+
+perform_identity_clustering() задаёт metric='euclidean' вместо 'cosine', нарушая рекомендацию для эмбеддингов.
+
+build_identity_timeline() не добавляет field “gaps” (список разрывов) в возвращаемый объект.
+
+detect_embedding_anomalies_by_dimensions() не классифицирует dimensions_200_230 как световые аномалии, а метит их «прочие».
+
+calculate_identity_confidence_score() не учитывает appearances_count ≥ min_appearance_count = 3, занижая доверие молодым кластерам.
+
+analyze_cluster_temporal_stability() не возвращает standard_deviation_of_gaps, требуемый temporal_stability_index.
+
+ensemble_embedding_analysis() отсутствует режим majority_vote, предусмотренный как запасной к fusion_strategy='mean-cosine'.
+
+detect_embedding_drift() не записывает drift_magnitude>0.1 как критическую аномалию для масок нового поколения.
+
+initialize_texture_analysis_tools() не строит Gabor фильтры frequencies=[0.1-0.4], orientations=11, критичные для _analyze_micro_wrinkles.
+
+analyze_skin_texture_by_zones() не нормализует гистограммы LBP на 256 бинов, вследствие чего entropy смещена.
+
+calculate_material_authenticity_score() не проверяет наличие всех LBP-пиков (15, 51 … 221) — оценивается лишь сумма.
+
+classify_mask_technology_level() игнорирует entropy при принятии решения, ориентируясь только на дату.
+
+detect_texture_transition_artifacts() не выводит gradient_magnitude_map для UI-визуализации швов.
+
+analyze_pore_structure_authenticity() обрабатывает регион 50×50 px, но спецификация требует ≥100×100 px.
+
+_analyze_micro_wrinkles() возвращает только mean_gabor_response, пропуская anisotropy_score.
+
+calculate_spectral_material_signature() анализирует FFT только до 0.4, тогда как пик 0.6 обязателен.
+
+adaptive_texture_analysis() не корректирует radius LBP при poor_lighting, нарушая “adaptive” в названии.
+
+build_medical_aging_model() не сохраняет baseline_metrics_1999, которые нужны predict_expected_metrics_for_age.
+
+calculate_putin_age_on_each_date() не возвращает leap_year_flag, поэтому downstream age-adjustment невозможен.
+
+predict_expected_metrics_for_age() не применяет elasticity_coeff = 1-0.015*(age-40) при age>40.
+
+detect_temporal_anomalies_in_metrics() использует z-порог ±3, а ТЗ устанавливает 2.5.
+
+seasonal_decomposition_analysis() не задаёт period=12 и тем самым теряет годовую сезонность.
+
+detect_change_points() фиксирует pen=5 вместо рекомендованных 10, вызывая избыточные тревоги.
+
+calculate_temporal_stability_index() не учитывает fractal_dimension > 1.5, нарушая формулу индекса.
+
+apply_bayesian_identity_analysis() стартует с prior_same_person = 0.9, а требуется 0.5 для нейтральной априорной вероятности.
+
+perform_cascade_verification() не останавливает пайп при geometry_score < 0.3, нарушая принцип независимого уровня.
+
+calculate_identity_authenticity_score() использует веса 0.25/0.25/0.25/0.25 вместо 0.3/0.3/0.2/0.2, смещая итоговый балл.
+
+perform_cross_source_verification() не сравнивает cosine_distance > 0.5 как критический порог кросс-источниковых расхождений

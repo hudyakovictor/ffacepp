@@ -53,7 +53,7 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(ColoredFormatter())
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     handlers=[
         log_file_handler,
         console_handler
@@ -66,11 +66,11 @@ try:
     from core_config import (
         validate_configuration, save_configuration_snapshot,
         PUTIN_BIRTH_DATE, START_ANALYSIS_DATE, END_ANALYSIS_DATE,
-        DATA_DIR, RESULTS_DIR, CACHE_DIR, LOGS_DIR,
+        DATA_DIR, RESULTS_DIR, CACHE_DIR, LOGS_DIR, CONFIG_DIR,
         MAX_FILE_UPLOAD_COUNT, ERROR_CODES, SYSTEM_VERSION,
-        AUTHENTICITY_WEIGHTS, CRITICAL_THRESHOLDS
+        AUTHENTICITY_WEIGHTS, CRITICAL_THRESHOLDS, MIN_VISIBILITY_Z
     )
-    from face_3d_analyzer import Face3DAnalyzer
+    from face_3d_analyzer import Face3DAnalyzer, initialize_3ddfa_components
     from embedding_analyzer import EmbeddingAnalyzer
     from texture_analyzer import TextureAnalyzer
     from temporal_analyzer import TemporalAnalyzer
@@ -163,11 +163,18 @@ class FaceAuthenticitySystem:
             
             # 5. ИСПРАВЛЕНО: face_3d_analyzer
             logger.info("Инициализация '3D Анализатора лица' (face_3d_analyzer)...")
-            self.components['face_3d_analyzer'] = Face3DAnalyzer()
+            from face_3d_analyzer import initialize_3ddfa_components
+            tddfa_models = initialize_3ddfa_components(str(CONFIG_DIR), skip_gpu_check=run_self_tests)
+            self.components['face_3d_analyzer'] = Face3DAnalyzer(tddfa_model=tddfa_models['tddfa'], face_boxes_model=tddfa_models['face_boxes'])
             
             # 6. ИСПРАВЛЕНО: embedding_analyzer
             logger.info("Инициализация 'Анализатора эмбеддингов' (embedding_analyzer)...")
-            self.components['embedding_analyzer'] = EmbeddingAnalyzer()
+            # Инициализируем EmbeddingAnalyzer без face_app, он инициализируется внутри себя
+            temp_embedding_analyzer = EmbeddingAnalyzer()
+            # Затем получаем инициализированный face_app из него
+            insightface_app_instance = temp_embedding_analyzer.face_app
+            # И теперь инициализируем финальный экземпляр, передавая ему face_app
+            self.components['embedding_analyzer'] = EmbeddingAnalyzer(face_app=insightface_app_instance)
             
             # 7. ИСПРАВЛЕНО: texture_analyzer
             logger.info("Инициализация 'Анализатора текстуры' (texture_analyzer)...")
@@ -187,7 +194,14 @@ class FaceAuthenticitySystem:
             
             # 11. ИСПРАВЛЕНО: data_processing (DataProcessor)
             logger.info("Инициализация 'Обработчика данных' (data_processor)...")
-            self.components['data_processor'] = DataProcessor()
+            self.components['data_processor'] = DataProcessor(
+                face_analyzer=self.components['face_3d_analyzer'],
+                embedding_analyzer=self.components['embedding_analyzer'],
+                texture_analyzer=self.components['texture_analyzer'],
+                temporal_analyzer=self.components['temporal_analyzer'],
+                data_manager=self.components['data_manager'],
+                metrics_calculator=self.components['metrics_calculator']
+            )
             
             # 12. ИСПРАВЛЕНО: visualization_engine
             logger.info("Инициализация 'Движка визуализации' (visualization_engine)...")
@@ -417,9 +431,8 @@ class FaceAuthenticitySystem:
             logger.info(f"{Colors.GREEN}✔ Временной индекс создан.{Colors.RESET}")
             
             # Асинхронная обработка файлов
-            import asyncio
             logger.info("Запуск асинхронной обработки файлов. Это может занять некоторое время...")
-            results_list = asyncio.run(self._process_files_async(valid_paths))
+            results_list = asyncio.run(self._process_files_async(chronological_index))
             
             # Агрегация результатов через results_aggregator
             results_aggregator = self.components['results_aggregator']
@@ -430,11 +443,12 @@ class FaceAuthenticitySystem:
             results["summary"] = results_aggregator.get_statistics()
             results["analysis_results"] = [
                 {
-                    "filepath": r.filepath,
-                    "authenticity_score": r.authenticity_score,
-                    "anomalies": r.anomalies,
-                    "metrics": r.metrics,
-                    "timestamp": r.timestamp
+                    "filepath": r["path"],
+                    "authenticity_score": r.get("authenticity_score", 0.0),
+                    "pose": r.get("pose", ""),
+                    "metrics": r.get("metrics", {}),
+                    "age": r.get("age", 0.0),
+                    "date": str(r.get("date", ""))
                 }
                 for r in results_list
             ]
@@ -454,140 +468,129 @@ class FaceAuthenticitySystem:
         finally:
             self.running = False
 
-    async def _process_files_async(self, filepaths: List[str]) -> List[Any]:
-        """Асинхронная обработка файлов"""
+    async def _process_files_async(self, chronological_index: List[Dict[str, Any]]) -> List[Any]:
+        """Асинхронная обработка файлов по хронологическому индексу"""
         try:
-            # ИСПРАВЛЕНО: Использование data_processor
-            data_processor = self.components['data_processor']
+            face_analyzer = self.components['face_3d_analyzer']
+            data_manager = self.components['data_manager']
             
-            def progress_callback(progress: float, message: str):
-                # logger.info(f"Прогресс: {progress:.1%} - {message}") # Отключено для более чистого вывода в консоль
-                pass # Сообщения о прогрессе будут обрабатываться внутри Gradio или других модулей
+            all_results = []
             
-            results = await data_processor.process_batch_async(filepaths, progress_callback)
+            total_items = sum(len(item["images"]) for item in chronological_index)
+            processed_count = 0
             
-            self.session_stats["files_processed"] = len(filepaths)
-            self.session_stats["analyses_completed"] = len(results)
+            for item in chronological_index:
+                item_date = item["date"]
+                item_age = item["age_on_date"]
+                
+                for image_path in item["images"]:
+                    # Передаем image_path, item_date, item_age
+                    result = self._analyze_single_image_for_pipeline(image_path, item_date, item_age)
+                    all_results.append(result)
+                    processed_count += 1
+                    
+                    # Прогресс (можно использовать progress_callback, если он будет интегрирован на уровне _analyze_single_image_for_pipeline)
+                    if processed_count % 10 == 0:
+                        logger.info(f"Прогресс: {processed_count}/{total_items} файлов обработано.")
+
+            self.session_stats["files_processed"] = total_items
+            self.session_stats["analyses_completed"] = len(all_results)
             
-            logger.info(f"{Colors.GREEN}✔ Асинхронная обработка {len(results)} файлов завершена.{Colors.RESET}")
-            return results
+            logger.info(f"{Colors.GREEN}✔ Асинхронная обработка {len(all_results)} файлов завершена.{Colors.RESET}")
+            return all_results
             
         except Exception as e:
             logger.error(f"{Colors.RED}ОШИБКА: Не удалось асинхронно обработать файлы: {e}{Colors.RESET}")
             return []
 
-    def _analyze_single_file(self, filepath: str) -> Dict[str, Any]:
-        """ИСПРАВЛЕНО: Анализ одного файла с оригинальными модулями"""
+    def _analyze_single_image_for_pipeline(self, image_path: str, item_date: datetime.date, item_age: float) -> Dict[str, Any]:
+        """
+        Анализ одного изображения в рамках пайплайна bootstrap_pipeline.
+        Возвращает структурированный словарь с результатами анализа.
+        """
+        import cv2
+        
+        face_analyzer = self.components['face_3d_analyzer']
+        data_manager = self.components['data_manager']
+        
+        logger.info(f"Анализ изображения: {image_path}")
+        
         try:
-            import cv2
-            
-            # Загрузка изображения
-            image = cv2.imread(filepath)
-            if image is None:
-                logger.error(f"{Colors.RED}ОШИБКА: Не удалось загрузить изображение: {filepath}{Colors.RESET}")
-                raise ValueError(f"Не удалось загрузить изображение: {filepath}")
-            
-            # ИСПРАВЛЕНО: Валидация качества через data_manager
-            data_manager = self.components['data_manager']
-            quality_result = data_manager.validate_image_quality_for_analysis(filepath)
-            
-            if quality_result.get("quality_score", 0) < CRITICAL_THRESHOLDS.get("min_quality_score", 0.6):
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкое качество изображения для файла {filepath} (Балл: {quality_result.get('quality_score', 0):.2f}).{Colors.RESET}")
-                return {
-                    "filepath": filepath,
-                    "error": "Низкое качество изображения",
-                    "error_code": ERROR_CODES["E002"],
-                    "quality_score": quality_result.get("quality_score", 0)
-                }
-            
-            # ИСПРАВЛЕНО: 3D анализ лица через face_3d_analyzer
-            face_analyzer = self.components['face_3d_analyzer']
-            landmarks, confidence, shape = face_analyzer.extract_68_landmarks_with_confidence(image)
-            
-            if landmarks.size == 0:
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Лицо не обнаружено в файле: {filepath}{Colors.RESET}")
-                return {
-                    "filepath": filepath,
-                    "error": "Лицо не обнаружено",
-                    "error_code": ERROR_CODES["E001"]
-                }
-            
-            # Определение позы
-            pose = face_analyzer.determine_precise_face_pose(landmarks)
-            
-            # ИСПРАВЛЕНО: Расчет 15 метрик идентичности через metrics_calculator
-            metrics_calculator = self.components['metrics_calculator']
-            metrics_result = metrics_calculator.calculate_identity_signature_metrics(
-                landmarks, pose.get('pose_category', 'frontal')
-            )
-            
-            # ИСПРАВЛЕНО: Анализ эмбеддингов через embedding_analyzer
-            embedding_analyzer = self.components['embedding_analyzer']
-            embedding, emb_confidence = embedding_analyzer.extract_512d_face_embedding(image)
-            
-            # ИСПРАВЛЕНО: Анализ текстуры через texture_analyzer
-            texture_analyzer = self.components['texture_analyzer']
-            texture_metrics = texture_analyzer.analyze_skin_texture_by_zones(image, landmarks)
-            texture_authenticity = texture_analyzer.calculate_material_authenticity_score(texture_metrics)
-            
-            # Расчет итогового балла аутентичности с AUTHENTICITY_WEIGHTS
-            authenticity_score = self._calculate_overall_authenticity(
-                landmarks, embedding, texture_metrics, confidence, metrics_result
-            )
-            
-            logger.info(f"Анализ {filepath}: Балл аутентичности: {authenticity_score:.2f}")
-            
-            return {
-                "filepath": filepath,
-                "authenticity_score": authenticity_score,
-                "landmarks_count": len(landmarks),
-                "pose": pose,
-                "metrics": metrics_result.get('normalized_metrics', {}),
-                "embedding_confidence": emb_confidence,
-                "texture_authenticity": texture_authenticity,
-                "quality_score": quality_result.get("quality_score", 0),
-                "timestamp": datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА анализа файла {filepath}: {e}{Colors.RESET}")
-            return {
-                "filepath": filepath,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat()
-            }
+            img = cv2.imread(image_path)
+            if img is None:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось загрузить изображение {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Не удалось загрузить изображение"}
 
-    def _calculate_overall_authenticity(self, landmarks, embedding, texture_metrics, 
-                                      confidence, metrics_result) -> float:
-        """Расчет общего балла аутентичности с AUTHENTICITY_WEIGHTS"""
-        try:
-            # Компонентные баллы
-            geometry_score = min(1.0, confidence.mean() if confidence.size > 0 else 0.5)
-            embedding_score = 0.9 if embedding.size > 0 else 0.0
-            texture_score = 0.8 if texture_metrics else 0.0
-            temporal_consistency = 0.7  # Заглушка для одиночного файла
-            temporal_stability = 0.7
-            aging_consistency = 0.8
-            anomalies_score = 0.9  # 1 - anomaly_rate
-            liveness_score = 0.8
-            
-            # Взвешенный балл с AUTHENTICITY_WEIGHTS
-            overall_score = (
-                AUTHENTICITY_WEIGHTS["geometry"] * geometry_score +
-                AUTHENTICITY_WEIGHTS["embedding"] * embedding_score +
-                AUTHENTICITY_WEIGHTS["texture"] * texture_score +
-                AUTHENTICITY_WEIGHTS["temporal_consistency"] * temporal_consistency +
-                AUTHENTICITY_WEIGHTS["temporal_stability"] * temporal_stability +
-                AUTHENTICITY_WEIGHTS["aging_consistency"] * aging_consistency +
-                AUTHENTICITY_WEIGHTS["anomalies_score"] * anomalies_score +
-                AUTHENTICITY_WEIGHTS["liveness_score"] * liveness_score
+            # 1. Валидация качества изображения
+            quality_results = data_manager.validate_image_quality_for_analysis(img)
+            if quality_results['quality_score'] < CRITICAL_THRESHOLDS["min_quality_score"]:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкое качество изображения {image_path} (score: {quality_results['quality_score']:.2f}).{Colors.RESET}")
+                return {"path": image_path, "quality_issues": quality_results["issues"], "quality_score": quality_results["quality_score"], "error": "Низкое качество изображения"}
+
+            # 2. Извлечение 68 ландмарок
+            landmarks_3d, confidence_array, param = face_analyzer.extract_68_landmarks_with_confidence(img, models={'tddfa': face_analyzer.tddfa, 'face_boxes': face_analyzer.faceboxes}) # Pass models from analyzer
+            if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Лицо не обнаружено на изображении {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Лицо не обнаружено"}
+
+            # 3. Определение позы
+            pose_analysis = face_analyzer.determine_precise_face_pose(landmarks_3d, param, confidence_array)
+            pose_category = pose_analysis["pose_category"]
+
+            # 4. Нормализация ландмарок
+            vis = landmarks_3d[:,2] > MIN_VISIBILITY_Z
+            norm_landmarks = face_analyzer.normalize_landmarks_by_pose_category(landmarks_3d, pose_category, vis)
+
+            # 5. Расчет метрик идентичности
+            metrics = face_analyzer.calculate_identity_signature_metrics(norm_landmarks, pose_category)
+
+            # 6. Извлечение эмбеддинга лица (512D) и анализ эмбеддингов
+            embedding_analyzer = self.components['embedding_analyzer']
+            emb, emb_conf = embedding_analyzer.extract_512d_face_embedding(img, embedding_analyzer.face_app)
+            if emb is not None and emb_conf >= 0.9:
+                # Анализ эмбеддингов: кластеризация, аномалии, confidence, fusion
+                # (В реальном пайплайне сюда можно добавить загрузку всех эмбеддингов для identity)
+                emb_result = {
+                    'embedding': emb.tolist(),
+                    'extraction_confidence': float(emb_conf)
+                }
+                # Пример: кластеризация (можно расширить)
+                # cluster_res = embedding_analyzer.perform_identity_clustering([...])
+                # fusion: ensemble_embedding_analysis
+                fusion = embedding_analyzer.ensemble_embedding_analysis(
+                    np.expand_dims(emb, axis=0), strategies=("mean-cosine", "median")
+                )
+                emb_result['ensemble_fusion'] = fusion
+            else:
+                emb_result = {'embedding': None, 'extraction_confidence': float(emb_conf)}
+
+            # 7. Анализ текстуры кожи (LBP, Gabor, FFT, entropy, Level)
+            texture_analyzer = self.components['texture_analyzer']
+            # Для анализа зон нужны landmarks (нормализованные или оригинальные)
+            texture_zones = texture_analyzer.analyze_skin_texture_by_zones(img, landmarks_3d)
+            # Итоговый score материала
+            material_score = texture_analyzer.calculate_material_authenticity_score(texture_zones)
+            # Классификация уровня маски
+            mask_level = texture_analyzer.classify_mask_technology_level(texture_zones, photo_date=item_date)
+
+            # Возвращаем расширенный результат
+            return dict(
+                path=image_path,
+                pose=pose_category,
+                metrics=metrics,
+                age=item_age,
+                date=item_date,
+                quality_score=quality_results["quality_score"],
+                quality_issues=quality_results["issues"],
+                landmarks_confidence=confidence_array.mean(),
+                embedding_analysis=emb_result,
+                texture_zones=texture_zones,
+                material_score=material_score,
+                mask_level=mask_level
             )
-            
-            return float(np.clip(overall_score, 0.0, 1.0))
-            
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА расчета балла аутентичности: {e}{Colors.RESET}")
-            return 0.0
+            logger.error(f"{Colors.RED}ОШИБКА анализа изображения {image_path}: {e}{Colors.RESET}")
+            return {"path": image_path, "error": str(e)}
 
     def _save_cli_results(self, results: Dict[str, Any], format: str) -> Path:
         """Сохранение результатов CLI"""

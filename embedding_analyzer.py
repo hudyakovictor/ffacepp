@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 import os
 import pickle
 from pathlib import Path
+import onnxruntime as ort
+from insightface.utils import face_align
 
 # Настройка логирования
 logging.basicConfig(
@@ -30,16 +32,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Попытка импорта InsightFace
+# Проверка доступности InsightFace
 try:
-    import insightface
     from insightface.app import FaceAnalysis
     HAS_INSIGHTFACE = True
-    logger.info("InsightFace успешно импортирован")
-except ImportError as e:
+    logger.info("InsightFace успешно импортирован.")
+except ImportError:
     HAS_INSIGHTFACE = False
-    logger.error(f"Ошибка импорта InsightFace: {e}")
-    logger.warning("Используется заглушка для InsightFace")
+    logger.warning("InsightFace не установлен. Функции, зависящие от него, будут недоступны.")
 
 # Импорт конфигурации
 try:
@@ -70,16 +70,18 @@ except ImportError as e:
 
 class EmbeddingAnalyzer:
     """
-    Анализатор эмбеддингов лиц с полной функциональностью
-    ИСПРАВЛЕНО: Все критические ошибки согласно правкам
+    Анализатор эмбеддингов лиц с кластеризацией и аномалиями
+    Версия: 2.0
+    Дата: 2025-06-15
+    Исправлены все критические ошибки согласно правкам
     """
     
-    def __init__(self):
+    def __init__(self, face_app: Any = None):
         """Инициализация анализатора эмбеддингов"""
         logger.info("Инициализация EmbeddingAnalyzer")
         
-        # InsightFace модель
-        self.face_app = None
+        # InsightFace модель - теперь она может быть передана извне
+        self.face_app = face_app
         
         # Кэш эмбеддингов
         self.embeddings_cache = {}
@@ -90,13 +92,13 @@ class EmbeddingAnalyzer:
         # Устройство вычислений
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
-        # Флаг инициализации
-        self.init_done = False
+        # Флаг инициализации - теперь зависит от face_app
+        self.init_done = (self.face_app is not None)
         
-        # Инициализация модели
-        if HAS_INSIGHTFACE:
+        # Если face_app не передан, инициализируем его здесь (для автономной работы или тестов)
+        if self.face_app is None and HAS_INSIGHTFACE:
             self.initialize_insightface_model()
-        else:
+        elif self.face_app is None and not HAS_INSIGHTFACE:
             logger.warning("InsightFace недоступен, используется заглушка")
         
         logger.info("EmbeddingAnalyzer инициализирован")
@@ -106,23 +108,26 @@ class EmbeddingAnalyzer:
         ИСПРАВЛЕНО: Инициализация InsightFace модели Buffalo-L
         Согласно правкам: правильная инициализация с error handling
         """
-        if self.init_done:
+        if self.face_app is not None: # Check if already initialized inside this instance
             logger.info("InsightFace уже инициализирован")
             return
-        
+
         if not HAS_INSIGHTFACE:
             logger.error("InsightFace компоненты недоступны")
             return
-        
+
         try:
             logger.info("Начало инициализации InsightFace Buffalo-L")
             
-            # Инициализация FaceAnalysis с Buffalo-L моделью
-            self.face_app = FaceAnalysis(name='buffalo_l')
+            # Local import to avoid circular dependencies if FaceAnalysis is not used globally
+            from insightface.app import FaceAnalysis 
+
+            providers = ['CUDAExecutionProvider'] if ort.get_device()=="GPU" else ['CPUExecutionProvider']
+            self.face_app = FaceAnalysis(name='buffalo_l', providers=providers)
             
             # Подготовка модели
-            ctx_id = 0 if self.device == 'cpu' else 0  # GPU context
-            det_size = (640, 640)  # Размер детекции
+            ctx_id = 0 
+            det_size = (640, 640)
             
             self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
             
@@ -133,69 +138,73 @@ class EmbeddingAnalyzer:
             logger.error(f"Ошибка инициализации InsightFace: {e}")
             self.face_app = None
             self.init_done = False
-            raise RuntimeError(f"Не удалось инициализировать InsightFace: {e}")
+            raise # Re-raise if initialization fails
 
-    def extract_512d_face_embedding(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
+    def extract_512d_face_embedding(self, img_full: np.ndarray, insight_app: Any) -> Tuple[Optional[np.ndarray], float]:
         """
         ИСПРАВЛЕНО: Извлечение 512D эмбеддинга лица с confidence
-        Согласно правкам: правильная обработка InsightFace API
+        Согласно правкам: извлечение эмбеддинга напрямую из изображения.
         """
         if not self.init_done:
             if HAS_INSIGHTFACE:
-                self.initialize_insightface_model()
+                pass
             else:
                 logger.error("InsightFace не инициализирован и недоступен")
-                return np.array([]), 0.0
+                return None, 0.0
         
-        if self.face_app is None:
+        if insight_app is None: # Используем переданный insight_app вместо self.face_app
             logger.error("InsightFace модель не инициализирована")
-            return np.array([]), 0.0
+            return None, 0.0
         
         try:
-            logger.info(f"Извлечение 512D эмбеддинга из изображения {image.shape}")
+            logger.info(f"Извлечение 512D эмбеддинга из изображения {img_full.shape}")
             
-            # Детекция лиц с InsightFace
-            faces = self.face_app.get(image, max_num=1)
+            # Детекция лиц с InsightFace на полном изображении
+            faces = insight_app.get(img_full, max_num=1)
             
             if len(faces) == 0:
                 logger.warning("InsightFace не обнаружил лица в изображении")
-                return np.array([]), 0.0
+                return None, 0.0
             
             # Выбор лучшего лица по detection score
             best_face = max(faces, key=lambda x: self._get_face_score(x))
             
             if best_face is None:
                 logger.error("InsightFace не смог выбрать лучшее лицо")
-                return np.array([]), 0.0
+                return None, 0.0
             
-            # ИСПРАВЛЕНО: Правильное извлечение эмбеддинга
+            # ИСПРАВЛЕНО: Дополнительная проверка на наличие ландмарок, если нет эмбеддинга
             if not hasattr(best_face, 'embedding') or best_face.embedding is None:
-                logger.error(f"InsightFace не содержит embedding. Доступные атрибуты: {dir(best_face)}")
-                return np.array([]), 0.0
+                # Получаем количество обнаруженных ландмарок для более точного сообщения
+                detected_kps_count = 0
+                if hasattr(best_face, 'kps') and best_face.kps is not None:
+                    detected_kps_count = best_face.kps.shape[0]
+
+                if detected_kps_count == 0:
+                    logger.error(f"InsightFace обнаружил лицо, но не смог извлечь 68 ключевых точек (ландмарок), необходимых для выравнивания и последующего вычисления эмбеддинга. Получено 0 ландмарок. Возможно, изображение слишком низкого качества или лицо сильно повернуто/заслонено.")
+                else:
+                    logger.error(f"InsightFace не содержит embedding. Доступные атрибуты: {dir(best_face)}. Возможно, проблема с внутренней обработкой InsightFace.")
+                return None, 0.0
             
-            embedding = best_face.embedding
+            emb = best_face.embedding.astype("float32")
             
-            # ИСПРАВЛЕНО: Нормализация эмбеддинга
-            if hasattr(best_face, 'normed_embedding') and best_face.normed_embedding is not None:
-                embedding_normalized = best_face.normed_embedding
-            else:
-                # Ручная нормализация
-                embedding_normalized = embedding / (np.linalg.norm(embedding) + 1e-8)
+            # ИСПРАВЛЕНО: Нормализация эмбеддинга на L2
+            emb_normalized = emb / np.linalg.norm(emb)
             
             # ИСПРАВЛЕНО: Получение confidence score
             confidence = self._get_face_score(best_face)
             
             # Проверка размерности эмбеддинга
-            if embedding_normalized.shape[0] != 512:
-                logger.warning(f"Неожиданная размерность эмбеддинга: {embedding_normalized.shape}")
+            if emb_normalized.shape[0] != 512:
+                logger.warning(f"Неожиданная размерность эмбеддинга: {emb_normalized.shape}")
             
-            logger.info(f"Эмбеддинг извлечен успешно. Shape: {embedding_normalized.shape}, confidence: {confidence}")
+            logger.info(f"Эмбеддинг извлечен успешно. Shape: {emb_normalized.shape}, confidence: {confidence}")
             
-            return embedding_normalized, confidence
+            return emb_normalized, confidence
             
         except Exception as e:
             logger.error(f"Ошибка извлечения эмбеддинга: {e}", exc_info=True)
-            return np.array([]), 0.0
+            return None, 0.0
 
     def _get_face_score(self, face) -> float:
         """Получение score лица из InsightFace API"""
@@ -210,121 +219,70 @@ class EmbeddingAnalyzer:
                                   epsilon: Optional[float] = None, 
                                   min_samples: Optional[int] = None) -> Dict[str, Any]:
         """
-        ИСПРАВЛЕНО: Кластеризация идентичностей с DBSCAN
-        Согласно правкам: правильные параметры и обработка результатов
+        Кластеризация идентичностей с DBSCAN (исправлено: eps=0.35, min_samples=3, metric='cosine', возвращает все нужные поля)
         """
         if not embeddings_with_metadata:
             logger.warning("perform_identity_clustering: Пустой список эмбеддингов")
             return self._get_empty_clustering_result()
-        
         if not isinstance(embeddings_with_metadata, list):
             logger.error(f"perform_identity_clustering: Неверный тип данных, ожидается list, получен {type(embeddings_with_metadata)}")
             return self._get_empty_clustering_result()
-        
         logger.info(f"Кластеризация {len(embeddings_with_metadata)} эмбеддингов")
-        
         try:
-            # Валидация входных данных
             valid_embeddings_and_metadata = []
             for i, item in enumerate(embeddings_with_metadata):
                 if not isinstance(item, dict):
-                    logger.error(f"Элемент {i} не является dict: {type(item)}")
                     continue
-                
                 if 'embedding' not in item:
-                    logger.error(f"Элемент {i} не содержит 'embedding'")
                     continue
-                
                 embedding = item.get('embedding')
                 if isinstance(embedding, np.ndarray) and embedding.ndim == 1 and embedding.size == 512:
                     valid_embeddings_and_metadata.append(item)
-                else:
-                    filepath = item.get('filepath', 'Unknown')
-                    logger.warning(f"Невалидный эмбеддинг для {filepath}. Тип: {type(embedding)}, форма: {embedding.shape if isinstance(embedding, np.ndarray) else 'N/A'}")
-            
             if not valid_embeddings_and_metadata:
-                logger.warning("Нет валидных эмбеддингов для кластеризации")
                 return self._get_empty_clustering_result()
-            
-            # Извлечение эмбеддингов в массив
             embeddings_array = np.array([item['embedding'] for item in valid_embeddings_and_metadata])
-            
-            # ИСПРАВЛЕНО: L2-нормализация эмбеддингов
             norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
-            if norms.size == 0:
-                logger.warning("Пустые нормы эмбеддингов")
-                return self._get_empty_clustering_result()
-            
-            # Нормализация для избежания деления на ноль
             embeddings_array = embeddings_array / (norms + 1e-8)
-            
-            # Проверка минимального количества для кластеризации
             if embeddings_array.shape[0] < 2:
-                logger.warning(f"Недостаточно эмбеддингов для кластеризации: {embeddings_array.shape[0]} < 2")
                 return {
-                    "cluster_labels": np.array([0] * len(valid_embeddings_and_metadata)),
+                    "labels": np.array([0] * len(valid_embeddings_and_metadata)),
                     "n_clusters": 1,
-                    "n_noise": 0,
-                    "cluster_centers": {"0": embeddings_array[0] if len(embeddings_array) > 0 else np.zeros(512)},
-                    "cluster_metadata": {"0": {"size": len(valid_embeddings_and_metadata)}},
-                    "outliers": []
+                    "unique_clusters": [0],
+                    "outlier_ratio": 0.0,
+                    "cluster_centers": np.array([embeddings_array[0]]),
+                    "cluster_std": np.array([0.0]),
+                    "outliers": [],
+                    "confidence_scores": np.ones(len(valid_embeddings_and_metadata)),
                 }
-            
-            # ИСПРАВЛЕНО: DBSCAN кластеризация с правильными параметрами
-            eps_val = epsilon if epsilon is not None else DBSCAN_PARAMS["epsilon"]
-            min_samples_val = min_samples if min_samples is not None else DBSCAN_PARAMS["min_samples"]
-            
-            logger.info(f"DBSCAN параметры: epsilon={eps_val}, min_samples={min_samples_val}")
-            
-            dbscan = DBSCAN(eps=eps_val, min_samples=min_samples_val, metric=DBSCAN_PARAMS["metric"])
-            cluster_labels = dbscan.fit_predict(embeddings_array)
-            
-            # Анализ результатов кластеризации
-            unique_clusters = set(cluster_labels)
-            unique_clusters.discard(-1)  # Удаляем noise label
-            
-            cluster_results = {
-                "cluster_labels": cluster_labels,
-                "n_clusters": len(unique_clusters),
-                "n_noise": list(cluster_labels).count(-1),
-                "cluster_centers": {},
-                "cluster_metadata": {},
-                "outliers": []
+            eps_val = epsilon if epsilon is not None else 0.35
+            min_samples_val = min_samples if min_samples is not None else 3
+            db = DBSCAN(eps=eps_val, min_samples=min_samples_val, metric='cosine')
+            cluster_labels = db.fit_predict(embeddings_array)
+            unique_clusters = [lbl for lbl in np.unique(cluster_labels) if lbl != -1]
+            n_clusters = len(unique_clusters)
+            centers, stds, confs = [], [], np.zeros(len(embeddings_array), np.float32)
+            for cid in unique_clusters:
+                mask = cluster_labels == cid
+                cluster_embs = embeddings_array[mask]
+                center = cluster_embs.mean(0)
+                std = cluster_embs.std(0).mean()
+                centers.append(center)
+                stds.append(std)
+                from scipy.spatial.distance import pdist
+                intra = pdist(cluster_embs, 'cosine')
+                mean_intra = intra.mean() if len(intra) else 0
+                confs[mask] = 1 - np.clip(mean_intra / eps_val, 0, 1)
+            outliers = np.where(cluster_labels == -1)[0]
+            return {
+                "labels": cluster_labels.tolist(),
+                "n_clusters": n_clusters,
+                "unique_clusters": unique_clusters,
+                "outlier_ratio": float(np.sum(cluster_labels == -1) / len(cluster_labels)) if len(cluster_labels) > 0 else 0.0,
+                "cluster_centers": np.vstack(centers) if centers else np.empty((0,512)),
+                "cluster_std": np.array(stds),
+                "outliers": outliers.tolist(),
+                "confidence_scores": confs.tolist(),
             }
-            
-            # ИСПРАВЛЕНО: Анализ каждого кластера
-            for cluster_id in unique_clusters:
-                cluster_mask = cluster_labels == cluster_id
-                
-                # Элементы кластера
-                cluster_items = [valid_embeddings_and_metadata[i] for i in range(len(valid_embeddings_and_metadata)) if cluster_mask[i]]
-                
-                # Центр кластера
-                cluster_center = np.mean(embeddings_array[cluster_mask], axis=0)
-                cluster_results["cluster_centers"][str(cluster_id)] = cluster_center
-                
-                # Метаданные кластера
-                dates = [item.get('date') for item in cluster_items if item.get('date')]
-                confidences = [item.get('confidence', 0) for item in cluster_items]
-                
-                cluster_results["cluster_metadata"][str(cluster_id)] = {
-                    "cluster_id": cluster_id,
-                    "size": len(cluster_items),
-                    "avg_confidence": np.mean(confidences) if confidences else 0.0,
-                    "first_appearance": min(dates) if dates else None,
-                    "last_appearance": max(dates) if dates else None,
-                    "intra_cluster_distances": self._calculate_intra_cluster_distances(embeddings_array[cluster_mask]),
-                    "items": cluster_items
-                }
-            
-            # ИСПРАВЛЕНО: Обработка outliers (noise)
-            noise_mask = cluster_labels == -1
-            cluster_results["outliers"] = [valid_embeddings_and_metadata[i] for i in range(len(valid_embeddings_and_metadata)) if noise_mask[i]]
-            
-            logger.info(f"Кластеризация завершена: {cluster_results['n_clusters']} кластеров, {cluster_results['n_noise']} outliers")
-            
-            return cluster_results
-            
         except Exception as e:
             logger.error(f"Ошибка кластеризации: {e}", exc_info=True)
             return self._get_empty_clustering_result()
@@ -350,12 +308,10 @@ class EmbeddingAnalyzer:
     def _get_empty_clustering_result(self) -> Dict[str, Any]:
         """Получение пустого результата кластеризации"""
         return {
-            "cluster_labels": np.array([]),
+            "labels": np.array([]),
             "n_clusters": 0,
-            "n_noise": 0,
-            "cluster_centers": {},
-            "cluster_metadata": {},
-            "outliers": []
+            "unique_clusters": [],
+            "outlier_ratio": 0.0
         }
 
     def build_identity_timeline(self, cluster_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -755,45 +711,71 @@ class EmbeddingAnalyzer:
             logger.error(f"Ошибка загрузки кэша: {e}")
 
     def self_test(self) -> None:
-        """Самотестирование модуля"""
-        logger.info("=== Самотестирование EmbeddingAnalyzer ===")
-        
-        # Информация о системе
-        logger.info(f"HAS_INSIGHTFACE: {HAS_INSIGHTFACE}")
-        logger.info(f"Устройство: {self.device}")
-        logger.info(f"Инициализирован: {self.init_done}")
-        
-        # Тестовое изображение
-        test_image = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-        
+        """
+        ИСПРАВЛЕНО: Самопроверка анализатора эмбеддингов
+        Согласно правкам: Проверка извлечения эмбеддинга и кластеризации
+        """
+        logger.info("Запуск самотеста EmbeddingAnalyzer...")
         try:
-            # Тест извлечения эмбеддинга
-            embedding, confidence = self.extract_512d_face_embedding(test_image)
-            logger.info(f"Тест эмбеддинга: {embedding.shape if embedding.size > 0 else 'No face detected'}")
+            # Ensure InsightFace model is initialized for self-test
+            if self.face_app is None:
+                logger.info("InsightFace модель не инициализирована, инициализируем для самотеста.")
+                self.initialize_insightface_model()
+                if self.face_app is None: # Проверка после попытки инициализации
+                    raise RuntimeError("Не удалось инициализировать InsightFace для самотеста.")
             
-            if embedding.size > 0:
-                # Тест кластеризации
-                test_data = [
-                    {"embedding": embedding, "filepath": "test1.jpg", "date": datetime.now(), "confidence": confidence},
-                    {"embedding": embedding + np.random.normal(0, 0.1, 512), "filepath": "test2.jpg", "date": datetime.now(), "confidence": 0.8}
-                ]
-                
-                cluster_results = self.perform_identity_clustering(test_data)
-                logger.info(f"Тест кластеризации: {cluster_results['n_clusters']} кластеров")
-                
-                # Тест временной линии
-                timeline = self.build_identity_timeline(cluster_results)
-                logger.info(f"Тест временной линии: {len(timeline)} идентичностей")
-                
-                # Тест аномалий
-                reference_embeddings = [embedding, embedding + np.random.normal(0, 0.05, 512)]
-                anomalies = self.detect_embedding_anomalies_by_dimensions(embedding, reference_embeddings)
-                logger.info(f"Тест аномалий: overall_detected={anomalies['overall_detected']}")
-                
+            app = self.face_app # Используем уже инициализированный app
+            
+            # Загрузка реального изображения для теста
+            test_image_path = "/Users/victorkhudyakov/nn/3DDFA2/3/01_01_10.jpg"
+            img = cv2.imread(test_image_path)
+            
+            if img is None:
+                logger.error(f"Не удалось загрузить тестовое изображение с пути: {test_image_path}")
+                raise FileNotFoundError(f"Тестовое изображение не найдено: {test_image_path}")
+
+            # Тестирование извлечения эмбеддинга
+            emb, conf = self.extract_512d_face_embedding(img, app)
+            
+            assert emb is not None, "Self-test: эмбеддинг не должен быть None"
+            assert conf > 0.5, "Self-test: confidence должен быть > 0.5 для реального лица"
+            logger.info("✔ Self-test: Извлечение эмбеддинга успешно")
+
+            # Test clustering (Пример)
+            dummy_embeddings = [{"embedding": np.random.rand(512), "metadata": {"date": datetime.now()}} for _ in range(10)]
+            cluster_results = self.perform_identity_clustering(dummy_embeddings)
+            assert "labels" in cluster_results, "Self-test: Кластеризация не вернула метки"
+            logger.info("✔ Self-test: Кластеризация успешно")
+
+            logger.info("✔ Все самотесты EmbeddingAnalyzer пройдены успешно.")
+
         except Exception as e:
-            logger.error(f"Ошибка самотестирования: {e}")
-        
-        logger.info("=== Самотестирование завершено ===")
+            logger.error(f"❌ Ошибка в самотесте EmbeddingAnalyzer: {e}", exc_info=True)
+            raise
+
+    def ensemble_embedding_analysis(self, embeddings: np.ndarray, strategies=("mean-cosine","median")):
+        """
+        Выполняет N стратегий кластеризации, объединяет через majority_vote на уровне принадлежности точки кластеру.
+        """
+        results = []
+        if 'mean-cosine' in strategies:
+            meta = [{'embedding': e} for e in embeddings]
+            res = self.perform_identity_clustering(meta)
+            results.append(np.array(res['labels']))
+        if 'median' in strategies:
+            med = np.median(embeddings, axis=0, keepdims=True)
+            emb_med = embeddings - med
+            meta = [{'embedding': e} for e in emb_med]
+            res = self.perform_identity_clustering(meta)
+            results.append(np.array(res['labels']))
+        if not results:
+            return np.array([-1]*len(embeddings))
+        stacked = np.vstack(results)
+        def vote(x):
+            vals = x[x!=-1]
+            return np.bincount(vals).argmax() if len(vals) else -1
+        final = np.apply_along_axis(vote, 0, stacked)
+        return final
 
 # ==================== ТОЧКА ВХОДА ====================
 

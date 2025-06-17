@@ -16,7 +16,7 @@ from .onnx import convert_to_onnx
 import onnxruntime
 
 # some global configs
-confidence_threshold = 0.05
+confidence_threshold = 0.02
 top_k = 5000
 keep_top_k = 750
 nms_threshold = 0.3
@@ -29,6 +29,7 @@ HEIGHT, WIDTH = 720, 1080
 make_abs_path = lambda fn: osp.join(osp.dirname(osp.realpath(__file__)), fn)
 onnx_path = make_abs_path('weights/FaceBoxesProd.onnx')
 
+NORM_IOD_THRESHOLD = 50
 
 def viz_bbox(img, dets, wfp='out.jpg'):
     # show

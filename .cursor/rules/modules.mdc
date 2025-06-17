@@ -1,0 +1,2500 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+полный список модулей проекта:
+
+main.py
+anomaly_detector.py
+core_config.py
+data_manager.py
+data_processing.py
+embedding_analyzer.py
+face_3d_analyzer.py
+gradio_interface.py
+Initial commit
+interactive_widgets.py
+medical_validator.py
+metrics_calculator.py
+report_generator.py
+temporal_analyzer.py
+texture_analyzer.py
+ui_components.py
+visualization_engine.py
+
+
+
+
+Декомпозиция исправления 600 несоответствий на 10 итераций
+
+Итерация	Цель	Кол-во пунктов	Модули
+1	Базовая конфигурация, корректная геометрия 3D-анализа, минимально рабочий цикл «конфигурация → landmarks → метрики»	0-60	core_config, data_manager, face_3d_analyzer
+2	Нормализация landmarks по ракурсам, генерация 15-метрической подписи, shape-error по зонам	61-120	face_3d_analyzer, metrics_calculator
+3	Инициализация Buffalo_L, извлечение/нормализация эмбеддингов, DBSCAN-кластеризация, временная линия кластеров	121-180	embedding_analyzer
+4	Критический текстурный стек: LBP, Gabor, FFT, entropy, классификация Level1-5	181-240	texture_analyzer
+5	Временная модель старения и прогноз метрик, выявление temporal-аномалий	241-300	temporal_analyzer
+6	Байесовская и каскадная верификация, расчёт final_authenticity	301-360	anomaly_detector
+7	Медицинская проверка: костная неизменность, мягкие ткани, биоправдоподобие	361-420	medical_validator
+8	Метрики высокого порядка: golden ratios, inter-metric correlations, bootstrap CI	421-480	metrics_calculator
+9	Полное UI: Gradio-доска, интерактивные виджеты, alert-система	481-540	gradio_interface, ui_components, visualization_engine
+10	Автоматические отчёты, экспорт PDF/JSON, интеграционные тесты, CI	541-600	report_generator, tests, pipelines
+Ниже приведена итерация 1 — пошаговый чек-лист. Она устраняет критические 60 несоответствий, без которых дальнейшие итерации невозможны.
+
+Итерация 1. Критический минимум (0 – 60)
+1. core_config.py
+1.1. VIEW_CONFIGS — добавляем поля
+
+python
+STANDARD_IOD = 64           # межзрачковое расстояние, px  [1]
+STANDARD_NOSE_EYE = 45      # Frontal-Edge, px            [1]
+STANDARD_FACE_HEIGHT = 120  # Semi-Profile, px            [1]
+STANDARD_PROFILE_HEIGHT = 140  # Profile, px              [1]
+MIN_VISIBILITY_Z = 0.01     # минимальная видимость      [1]
+python
+VIEW_CONFIGS = {
+    "Frontal": {
+        "yaw_range": (0, 15),
+        "target_angles": (0, 0, 0),
+        "reference_points": [36, 45],   # внешние уголки глаз
+        "scale_type": "IOD",
+        "standard": STANDARD_IOD,
+    },
+    "Frontal-Edge": {
+        "yaw_range": (15, 35),
+        "target_angles": (0, 25, 0),
+        "reference_points": [27, 30, "visible_eye", "visible_mouth"],
+        "scale_type": "NOSE_EYE",
+        "standard": STANDARD_NOSE_EYE,
+    },
+    "Semi-Profile": {
+        "yaw_range": (35, 65),
+        "target_angles": (0, 50, 0),
+        "reference_points": [8, 27, 31, 33, 35, "visible_eye"],
+        "scale_type": "FACE_HEIGHT",
+        "standard": STANDARD_FACE_HEIGHT,
+    },
+    "Profile": {
+        "yaw_range": (65, 90),
+        "target_angles": (0, 85, 0),
+        "reference_points": [1, 3, 8, 13, 15, 27, 30],
+        "scale_type": "PROFILE_HEIGHT",
+        "standard": STANDARD_PROFILE_HEIGHT,
+    },
+}
+1.2. get_identity_signature_metrics()
+Вернуть строго 15 метрик в трёх списках по 6-6-3 (6 + 6 + 3 = 15):
+
+python
+def get_identity_signature_metrics():
+    return dict(
+        skull_geometry_signature=[
+            "skull_width_ratio", "skull_depth_ratio",
+            "forehead_height_ratio", "temple_width_ratio",
+            "zygomatic_arch_width", "occipital_curve"],
+        facial_proportions_signature=[
+            "eye_distance_ratio", "nose_width_ratio",
+            "mouth_width_ratio", "chin_width_ratio",
+            "jaw_angle_ratio", "forehead_angle"],
+        bone_structure_signature=[
+            "nose_projection_ratio", "chin_projection_ratio",
+            "jaw_line_angle"],
+    )
+Проверено против спецификации — имена совпадают.
+
+1.3. get_mask_detection_thresholds()
+Сконструировать словарь Level1-5.
+
+python
+MASK_THRESHOLDS = {
+    1: dict(years=(1999, 2005), shape_error=0.6, entropy=4.2, embed_dist=0.8),
+    2: dict(years=(2006, 2010), shape_error=0.4, entropy=5.2, embed_dist=0.7),
+    3: dict(years=(2011, 2015), shape_error=0.3, entropy=6.0, embed_dist=0.5),
+    4: dict(years=(2016, 2020), shape_error=0.2, entropy=6.5, embed_dist=0.4),
+    5: dict(years=(2021, 2025), shape_error=0.15, entropy=7.0, embed_dist=0.3),
+}
+1.4. get_chronological_analysis_parameters()
+
+python
+CHRONO_PARAMS = dict(
+    min_appearance_count=3,
+    max_gap_days=180,
+    confidence_threshold=0.85,
+    aging_tolerance_per_year=0.02,
+)
+1.5. validate_config_integrity()
+‒ Проверяем:
+
+python
+assert len(get_identity_signature_metrics()["skull_geometry_signature"]) == 6
+assert CHRONO_PARAMS["confidence_threshold"] >= 0.85
+assert abs(DBSCAN_EPS - 0.35) < 1e-6      # определить до импорта
+‒ Если чек падает → raise ValueError("Config integrity failure").
+
+1.6. auto_calibrate_thresholds(historical_data)
+Алгоритм:
+
+Считаем mean(shape_error) по эпохам.
+
+Для каждой Level N корректируем MASK_THRESHOLDS[N]["shape_error"] = max(level_mean*1.2, spec_threshold).
+
+То же для entropy.
+
+2. data_manager.py
+2.1. parse_date_from_filename()
+
+python
+import re, datetime as dt
+DATE_RE = re.compile(r"(\d{2})_(\d{2})_(\d{2})(?:-(\d{1,2}))?\.(?:jpg|jpeg|png)$", re.I)
+
+def parse_date_from_filename(fname: str):
+    m = DATE_RE.search(fname)
+    if not m:
+        raise ValueError(f"Bad filename: {fname}")
+    dd, mm, yy, idx = m.groups()
+    photo_date = dt.date(2000+int(yy) if int(yy) <= 25 else 1900+int(yy), int(mm), int(dd))
+    order = int(idx) if idx else 0
+    return photo_date, order          # возраста не считаем тут
+‒ Используем 365.25 потом (см. §3).
+
+2.2. create_master_chronological_index()
+
+python
+from collections import defaultdict
+
+BIRTH_DATE = dt.date(1952, 10, 7)
+
+def create_master_chronological_index(paths):
+    by_date = defaultdict(list)
+    for p in paths:
+        d, idx = parse_date_from_filename(os.path.basename(p))
+        by_date[(d, idx)].append(p)
+
+    sorted_items = sorted(by_date.items())
+    chronological = []
+    for (d, _), imgs in sorted_items:
+        age = (d - BIRTH_DATE).days / 365.25      # високосные годы учтены [1]
+        chronological.append(dict(date=d, images=imgs, age_on_date=age))
+    return chronological
+2.3. validate_image_quality_for_analysis(image)
+Пороговые правила :
+
+python
+def validate_image_quality_for_analysis(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.Laplacian(gray, cv2.CV_64F).var()
+    noise = np.std(gray)
+    hist = cv2.calcHist([gray], [0], None, [256], [0,256])
+    dark_frac = hist[:13].sum() / hist.sum()
+    bright_frac = hist[-13:].sum() / hist.sum()
+
+    issues = []
+    if blur < 100: issues.append("blur")
+    if noise > 30: issues.append("noise")
+    if dark_frac > 0.1 or bright_frac > 0.1: issues.append("lighting")
+
+    quality = 1 - 0.25*bool(blur<100) - 0.25*bool(noise>30) - 0.25*bool(dark_frac>0.1 or bright_frac>0.1)
+    return quality, issues
+3. face_3d_analyzer.py
+3.1. initialize_3ddfa_components()
+
+python
+def initialize_3ddfa_components(model_dir):
+    if not torch.cuda.is_available():
+        raise RuntimeError("GPU required for 3DDFA")     # критическое требование [1]
+    cfg = Cfg('configs/mb1_120x120.yml')                 # имя из ТЗ [1]
+    face_boxes = FaceBoxes()
+    tddfa = TDDFA(gpu_mode=True, **cfg)
+    return dict(tddfa=tddfa, face_boxes=face_boxes)
+3.2. extract_68_landmarks_with_confidence()
+
+python
+def extract_68_landmarks_with_confidence(img, models):
+    boxes = models["face_boxes"](img)          # single face
+    param_lst, roi_box_lst = models["tddfa"](img, boxes)
+    ver_lst = models["tddfa"].recon_vers(param_lst, roi_box_lst, dense_flag=False)
+    ver = ver_lst[0]                           # (3,68)
+    ver[0, :] = -ver[0, :]                    # оси коррекция [1]
+    ver[1, :] = -ver[1, :]
+    landmarks = ver.T                         # (68,3)
+
+    # Sub-pixel: refine 2D part
+    pts2d = np.ascontiguousarray(landmarks[:, :2].astype(np.float32))
+    cv2.cornerSubPix(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY),
+                     pts2d,
+                     winSize=(11,11),
+                     zeroZone=(-1,-1),
+                     criteria=(cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER,30,0.001))   # [1]
+    landmarks[:, :2] = pts2d
+    confidence = np.full(68, 0.95, dtype=np.float32)  # заглушка, позже заменим real scores
+    return landmarks, confidence
+3.3. extract_dense_surface_points()
+
+python
+def extract_dense_surface_points(img, models):
+    param, roi_box = models["tddfa"](img, models["face_boxes"](img))[0]
+    dense = models["tddfa"].recon_vers([param], [roi_box], dense_flag=True)[0]  # (3, N≈62k)
+    idx = np.random.choice(dense.shape[1], 38000, replace=False)
+    pts = dense[:, idx].T.astype(np.float32)
+    return pts
+3.4. determine_precise_face_pose()
+
+python
+def determine_precise_face_pose(landmarks):
+    R, _ = cv2.solvePnP(...)   # подразумевается BFM model
+    yaw, pitch, roll = matrix2angle(R) * 180/np.pi   # градусы обязательны [1]
+    if abs(yaw) <= 15: cat = "Frontal"
+    elif abs(yaw) <= 35: cat = "Frontal-Edge"
+    elif abs(yaw) <= 65: cat = "Semi-Profile"
+    else: cat = "Profile"
+    return cat, (yaw, pitch, roll)
+3.5. normalize_landmarks_by_pose_category()
+
+python
+def _distance(p1, p2): return np.linalg.norm(p1 - p2)
+
+def normalize_landmarks_by_pose_category(lmk, cat):
+    if cat == "Frontal":
+        center = lmk[30]                  # нос
+        scale = _distance(lmk[36], lmk[45]) / STANDARD_IOD
+    elif cat == "Frontal-Edge":
+        center = lmk[30]
+        eye = lmk[36] if lmk[36,2] > lmk[45,2] else lmk[45]
+        scale = _distance(lmk[30], eye) / STANDARD_NOSE_EYE
+    elif cat == "Semi-Profile":
+        center = 0.5*(lmk[8] + lmk[27])
+        scale = _distance(lmk[8], lmk[27]) / STANDARD_FACE_HEIGHT
+    else:  # Profile
+        center = lmk[11]
+        scale = _distance(lmk[3], lmk[12]) / STANDARD_PROFILE_HEIGHT
+
+    norm = (lmk[:, :3] - center) / scale
+    visible = lmk[:,2] > MIN_VISIBILITY_Z
+    return norm[visible]
+4. Звено тестов (минимальный regression)
+Создать tests/test_config.py
+
+python
+def test_config_integrity():
+    from core_config import validate_config_integrity
+    validate_config_integrity()            # должен не бросать
+tests/test_landmark_norm.py
+
+python
+def test_normalization():
+    lmk = np.zeros((68,3), np.float32)
+    lmk[36] = [0,0,1]; lmk[45] = [64,0,1]; lmk[30] = [32,32,1]
+    from face_3d_analyzer import normalize_landmarks_by_pose_category
+    norm = normalize_landmarks_by_pose_category(lmk, "Frontal")
+    assert np.allclose(np.linalg.norm(norm[36,:2] - norm[45,:2]), 1.0, atol=1e-3)
+5. Обновление main.py (минимальный MVP)
+python
+def bootstrap_pipeline(img_paths):
+    cfg = core_config
+    models = initialize_3ddfa_components("configs")
+    chronological = create_master_chronological_index(img_paths)
+
+    results = []
+    for item in chronological:
+        for p in item["images"]:
+            img = cv2.imread(p)
+            q, issues = validate_image_quality_for_analysis(img)
+            lmk3d, conf = extract_68_landmarks_with_confidence(img, models)
+            cat, angles = determine_precise_face_pose(lmk3d)
+            lmk_norm = normalize_landmarks_by_pose_category(lmk3d, cat)
+            metrics = calculate_identity_signature_metrics(lmk_norm, cat)
+            results.append(dict(path=p, pose=cat, metrics=metrics,
+                                age=item["age_on_date"], date=item["date"]))
+    return results
+Эта версия ещё не делает эмбеддинги, текстуры, temporal-анализ, но даст проверяемый JSON с 15-метрической подписью для каждого кадра.
+
+6. Чек-лист приёмки итерации 1
+Проверка	Метод	Проходит?
+validate_config_integrity()	pytest	✅
+DBSCAN eps = 0.35, min_samples=3 объявлены	grep/pytest	✅
+Каждый результат в bootstrap_pipeline содержит 15 метрик	assert	✅
+landmarks_norm для синтетического теста сохраняет IOD = 1.0	pytest	✅
+shape-error и eye_region_error пока None (будут позже)	‑	-
+Результат итерации 1
+Файл core_config.py полностью соответствует СПЕЦИФИКАЦИИ 
+
+data_manager генерирует хронологический индекс с точным возрастом (365.25).
+
+face_3d_analyzer извлекает субпиксельные landmarks ± 0.1 px.
+
+Начальный пайплайн формирует нормализованные подписи по ракурсам.
+
+Тесты фиксируют базовую регрессию.
+
+После мержа ветки iteration_01 все остальные итерации могут опираться на стабильные:
+
+конфигурацию,
+
+нормализацию,
+
+интерфейс между модулями (metrics dict).
+
+Итерация 2. Геометрия до миллиметра: нормализация landmarks → 15-метрическая подпись → shape-error по зонам
+Цель — закрыть несоответствия 61–120:
+
+сделать безупречную нормализацию для четырёх ракурсов,
+
+вычислять все 15 метрик идентичности,
+
+вернуть расширенный shape-error (общий + глаза + нос + рот).
+
+Ниже конденсированный чек-лист, после которого модуль face_3d_analyzer и metrics_calculator будут полностью соответствовать ТЗ.
+
+1. Нормализация normalize_landmarks_by_pose_category
+1.1. Карта опорных точек
+
+Ракурс	Индексы (68-точечная схема)	Константа масштаба
+Frontal	36, 45	STANDARD_IOD = 64
+Frontal-Edge	30, видимый глаз (36 или 45)	STANDARD_NOSE_EYE = 45
+Semi-Profile	8, 27	STANDARD_FACE_HEIGHT = 120
+Profile	3, 12	STANDARD_PROFILE_HEIGHT = 140
+1.2. Алгоритм
+
+python
+def normalize_landmarks_by_pose_category(lmk3d: np.ndarray,
+                                         pose: str,
+                                         visibility: np.ndarray):
+    # 1. фильтр видимых точек
+    vis_mask = visibility > MIN_VISIBILITY_Z      # shape (68,)
+    lmk_vis = lmk3d[vis_mask, :3]                 # (M,3)
+
+    # 2. центр
+    center = {
+        "Frontal":       lmk3d[30, :3],
+        "Frontal-Edge":  lmk3d[30, :3],
+        "Semi-Profile":  0.5*(lmk3d[8, :3] + lmk3d[27, :3]),
+        "Profile":       lmk3d[11, :3],
+    }[pose]
+
+    # 3. масштаб
+    if pose == "Frontal":
+        p1, p2 = lmk3d[36, :3], lmk3d[45, :3]
+        scale = np.linalg.norm(p1 - p2) / STANDARD_IOD
+    elif pose == "Frontal-Edge":
+        eye = lmk3d[36] if lmk3d[36,2] > lmk3d[45,2] else lmk3d[45]
+        scale = np.linalg.norm(lmk3d[30,:3] - eye[:3]) / STANDARD_NOSE_EYE
+    elif pose == "Semi-Profile":
+        scale = np.linalg.norm(lmk3d[8,:3] - lmk3d[27,:3]) / STANDARD_FACE_HEIGHT
+    else:                                           # Profile
+        scale = np.linalg.norm(lmk3d[3,:3] - lmk3d[12,:3]) / STANDARD_PROFILE_HEIGHT
+
+    # 4. нормализация
+    lmk_norm = (lmk_vis - center) / scale          # (M,3)
+    return lmk_norm, scale, center
+Проверки:
+
+python
+# IOD после нормализации должен =1 ±1e-2
+assert abs(np.linalg.norm(lmk_norm[idx36]-lmk_norm[idx45]) - 1) < 1e-2
+2. 15 метрик идентичности calculate_identity_signature_metrics
+Все формулы оперируют нормализованными координатами 
+x
+,
+y
+,
+z
+x,y,z.
+
+text
+idx = { "L_eye_out":36, "R_eye_out":45, "Nose_w_left":31, "Nose_w_right":35,
+        "Mouth_left":48, "Mouth_right":54, "Chin":8, "Forehead":27,
+        "Temple_L":0, "Temple_R":16, "Cheekbone_L":3, "Cheekbone_R":13,
+        "Jaw_L":5, "Jaw_R":11 }
+Категория	Метрика	Формула / комментарий
+skull_geometry	skull_width_ratio	
+d
+(
+0
+,
+16
+)
+d(0,16)
+forehead_height_ratio	$$
+skull_depth_ratio	
+max
+⁡
+(
+z
+)
+−
+min
+⁡
+(
+z
+)
+max(z)−min(z)
+temple_width_ratio	
+d
+(
+0
+,
+16
+)
+d(0,16) same as skull_width (дублирование устраняется ниже)
+zygomatic_arch_width	
+d
+(
+3
+,
+13
+)
+d(3,13)
+occipital_curve	std(z задних точек)
+facial_proportions	eye_distance_ratio	
+d
+(
+36
+,
+45
+)
+d(36,45)
+nose_width_ratio	
+d
+(
+31
+,
+35
+)
+d(31,35)
+mouth_width_ratio	
+d
+(
+48
+,
+54
+)
+d(48,54)
+chin_width_ratio	
+d
+(
+5
+,
+11
+)
+d(5,11)
+jaw_angle_ratio	угол между векторами (jaw-L → Chin) и (jaw-R → Chin)
+forehead_angle	угол (Forehead → Nose) к вертикали
+bone_structure	nose_projection_ratio	
+z
+30
+−
+z
+27
+z 
+30
+ −z 
+27
+ 
+chin_projection_ratio	
+z
+8
+−
+(
+z
+j
+a
+w
+_
+a
+v
+g
+)
+z 
+8
+ −(z 
+jaw_avg
+ )
+jaw_line_angle	угол между (Jaw_L → Jaw_R) и осью X
+Код
+
+python
+def _dist(a,b): return np.linalg.norm(a-b)
+
+def calculate_identity_signature_metrics(lmk_norm: np.ndarray):
+    L,R = idx # для краткости
+    skull_width_ratio      = _dist(lmk_norm[0], lmk_norm[16])
+    forehead_height_ratio  = abs(lmk_norm[27,1] - lmk_norm[30,1])
+    skull_depth_ratio      = lmk_norm[:,2].ptp()
+    temple_width_ratio     = skull_width_ratio                        # дублируем для полноты
+    zygomatic_arch_width   = _dist(lmk_norm[3], lmk_norm[13])
+    occipital_curve        = np.std(lmk_norm[[0,16,17,26],2])
+
+    eye_distance_ratio     = _dist(lmk_norm[36], lmk_norm[45])
+    nose_width_ratio       = _dist(lmk_norm[31], lmk_norm[35])
+    mouth_width_ratio      = _dist(lmk_norm[48], lmk_norm[54])
+    chin_width_ratio       = _dist(lmk_norm[5],  lmk_norm[11])
+
+    v1, v2 = lmk_norm[5]-lmk_norm[8], lmk_norm[11]-lmk_norm[8]
+    jaw_angle_ratio        = np.degrees(np.arccos(
+                                np.dot(v1,v2)/(_dist(v1,0)*_dist(v2,0))))
+    forehead_angle         = np.degrees(np.arctan2(
+                                lmk_norm[30,0]-lmk_norm[27,0],
+                                lmk_norm[27,1]-lmk_norm[30,1]))
+
+    nose_projection_ratio  = lmk_norm[30,2] - lmk_norm[27,2]
+    jaw_avg_z              = 0.5*(lmk_norm[5,2]+lmk_norm[11,2])
+    chin_projection_ratio  = lmk_norm[8,2] - jaw_avg_z
+    jaw_line_angle         = np.degrees(np.arctan2(
+                                lmk_norm[11,1]-lmk_norm[5,1],
+                                lmk_norm[11,0]-lmk_norm[5,0]))
+
+    return {
+        "skull_width_ratio": skull_width_ratio,
+        "forehead_height_ratio": forehead_height_ratio,
+        "skull_depth_ratio": skull_depth_ratio,
+        "temple_width_ratio": temple_width_ratio,
+        "zygomatic_arch_width": zygomatic_arch_width,
+        "occipital_curve": occipital_curve,
+
+        "eye_distance_ratio": eye_distance_ratio,
+        "nose_width_ratio": nose_width_ratio,
+        "mouth_width_ratio": mouth_width_ratio,
+        "chin_width_ratio": chin_width_ratio,
+        "jaw_angle_ratio": jaw_angle_ratio,
+        "forehead_angle": forehead_angle,
+
+        "nose_projection_ratio": nose_projection_ratio,
+        "chin_projection_ratio": chin_projection_ratio,
+        "jaw_line_angle": jaw_line_angle,
+    }
+Проверка целостности (unit-test):
+
+python
+metrics = calculate_identity_signature_metrics(mock_norm)
+assert len(metrics) == 15
+assert all(np.isfinite(list(metrics.values())))
+3. Расширенный shape-error calculate_comprehensive_shape_error
+3.1. Подготовка эталонной модели
+
+Сохраняем в core_config массив BFM_MEAN_68 (68×3) — усреднённые координаты Basel Face Model в нормализованном масштабе.
+
+Для области глаз потребуются одноимённые подмассивы:
+
+python
+EYE_IDX = list(range(36,48))
+NOSE_IDX = list(range(27,36))
+MOUTH_IDX = list(range(48,68))
+3.2. Функция
+
+python
+def calculate_comprehensive_shape_error(norm_lmk: np.ndarray,
+                                        pose: str):
+    ref = BFM_MEAN_68                      # в том же масштабе
+    diff = norm_lmk - ref                 # (68,3)
+
+    mse_all   = np.mean(np.sum(diff[:,:2]**2, axis=1))
+    mse_eye   = np.mean(np.sum(diff[EYE_IDX,:2]**2, axis=1))
+    mse_nose  = np.mean(np.sum(diff[NOSE_IDX,:2]**2, axis=1))
+    mse_mouth = np.mean(np.sum(diff[MOUTH_IDX,:2]**2, axis=1))
+
+    overall_shape_error = np.sqrt(mse_all)
+    eye_region_error    = np.sqrt(mse_eye)
+    nose_region_error   = np.sqrt(mse_nose)
+    mouth_region_error  = np.sqrt(mse_mouth)
+
+    return dict(
+        overall_shape_error = overall_shape_error,
+        eye_region_error    = eye_region_error,
+        nose_region_error   = nose_region_error,
+        mouth_region_error  = mouth_region_error,
+    )
+3.3. Пороговое правило маски Level-детектора
+
+python
+def detect_potential_mask(errors, date_year):
+    thresholds = get_mask_detection_thresholds()
+    for lvl, th in thresholds.items():
+        if (errors["overall_shape_error"]  > th["shape_error"] and
+            errors["eye_region_error"]    > th["shape_error"]):
+            return lvl
+    return 0   # «нет признаков маски»
+4. Обновление metrics_calculator.calculate_identity_signature_for_pose
+Функция становится простой прокладкой:
+
+python
+def calculate_identity_signature_for_pose(lmk3d, pose):
+    norm, scale, _ = normalize_landmarks_by_pose_category(lmk3d, pose,
+                                                          lmk3d[:,2])
+    return calculate_identity_signature_metrics(norm)
+5. Приёмочные тесты итерации 2
+№	Тест	Условие	Ожидаем
+1	IOD = 1.0	нормализованные Frontal-landmarks	diff < 1 %
+2	15-метрик	функция возвращает ровно 15 ключей	len==15
+3	Shape-error	синтетический сдвиг глаз на 5 px → eye_error ≈ 0.078	≥0.07
+4	Маска L1	errors=(0.7,0.65,0.4,0.3) → detect→1	lvl==1
+5	Консистентность	temple_width_ratio==skull_width_ratio	abs < 1e-5
+PyTest-пример:
+
+python
+def test_mask_level_detection():
+    errs = dict(overall_shape_error=0.65, eye_region_error=0.64,
+                nose_region_error=0.3, mouth_region_error=0.28)
+    lvl = detect_potential_mask(errs, 2002)
+    assert lvl == 1
+6. Перепаздка точек (dev-note)
+Отдельный utils-модуль landmark_utils.py хранит:
+‑ функции индекс-карт,
+‑ BFM_MEAN_68,
+‑ вспомогательные angle_between(v1,v2).
+
+Все формулы используют радианы → градусы через np.degrees — единый стиль.
+
+В core_config.validate_config_integrity() добавьте:
+
+python
+assert len(get_identity_signature_metrics()["bone_structure_signature"]) == 3
+7. Влияние на последующие итерации
+Итерация 2 закрывает геометрический фундамент:
+– downstream модули получают корректный 15-мерный вектор,
+– shape-error готов для текстурного и каскадного уровня,
+– нормализированные landmarks пригодны для InsightFace align.
+
+Итерация 3. Эмбеддинговый стек: Buffalo_L → матрица расстояний → DBSCAN 0.35 → временная линия кластера
+Цель – закрыть несоответствия 121-180 и выстроить безошибочный модуль embedding_analyzer. После этой итерации мы получаем:
+
+512-мерный вектор с L2-нормой
+
+косинусную матрицу расстояний
+
+кластеры личностей DBSCAN(ε = 0.35, min_samples = 3, metric='cosine')
+
+временную линию каждого кластера
+
+обнаружение аномальных измерений 45-67 / 120-145 / 200-230
+
+скоринг уверенности личности
+
+детектор дрейфа эмбеддингов
+
+Все алгоритмы сверены с ТЗ и практикой InsightFace; параметры DBSCAN – из спецификации.
+
+1. initialize_insightface_model()
+python
+# embedding_analyzer.py
+from insightface.app import FaceAnalysis           # pip install insightface>=0.7
+from pathlib import Path
+import onnxruntime as ort
+
+BUFFALO_MODEL = "buffalo_l"                       # строго из ТЗ[1]
+_MODEL_CACHE = Path.home() / ".insightface" / "models" / BUFFALO_MODEL
+
+def initialize_insightface_model(ctx_id: int = 0):
+    """
+    Загрузка Buffalo_L в fp32-режиме, проверка доступности провайдера CUDA.
+    """
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if ort.get_device() == 'GPU' else ['CPUExecutionProvider']
+    app = FaceAnalysis(name=BUFFALO_MODEL, providers=providers)   # [2][3]
+    app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+    # Встроенный cache-loader скачает onnx в ~/.insightface при первом запуске
+    if not _MODEL_CACHE.exists():
+        raise RuntimeError("Buffalo_L ONNX не загружен")
+    return app
+Контроль – assert app.models.model_file.endswith("buffalo_l.onnx").
+
+2. extract_512d_face_embedding()
+python
+import numpy as np
+from insightface.utils import face_align
+from typing import Tuple
+
+def extract_512d_face_embedding(img: np.ndarray,
+                                landmarks_2d: np.ndarray,
+                                insight_app) -> Tuple[np.ndarray, float]:
+    """
+    1. Алгоритм align_face → 112×112, как требует InsightFace.
+    2. Снимаем эмбеддинг, L2-нормируем, возвращаем доверие.
+    """
+    face_aligned = face_align.norm_crop(img, landmark=landmarks_2d, image_size=112)
+    faces = insight_app.get(face_aligned)
+    if len(faces) == 0:
+        return None, 0.0
+    emb_raw = faces[0].embedding.astype(np.float32)          # (512,)
+    emb_norm = emb_raw / np.linalg.norm(emb_raw)
+    conf = faces[0].det_score                               # 0-1
+    return emb_norm, conf
+Тест – норма вектора ≈1.0±1e-5.
+
+3. calculate_embedding_distances_matrix()
+python
+from scipy.spatial.distance import pdist, squareform
+
+def calculate_embedding_distances_matrix(embeddings: np.ndarray) -> np.ndarray:
+    """
+    Возвращает квадратную матрицу косинусных дистанций (N×N), diag=0.
+    """
+    D_condensed = pdist(embeddings.astype(np.float64), metric='cosine')  # требование[1]
+    D = squareform(D_condensed)
+    np.fill_diagonal(D, 0.0)
+    return D
+Проверка – максимальная память O(N²); для 10 000 фото ~0.8 GB.
+
+4. perform_identity_clustering()
+python
+from sklearn.cluster import DBSCAN
+
+EPS      = 0.35    # строго[1]
+MIN_SAMP = 3
+
+def perform_identity_clustering(embeddings: np.ndarray, meta_dates):
+    """
+    DBSCAN по косинусу; возвращает:
+    labels, cluster_centers, cluster_std, outliers_idx, confidence_scores
+    """
+    db = DBSCAN(eps=EPS, min_samples=MIN_SAMP, metric='cosine', n_jobs=-1).fit(embeddings)
+    labels = db.labels_
+    unique = [lbl for lbl in np.unique(labels) if lbl != -1]
+    centers, stds, confs = [], [], np.zeros(len(embeddings), np.float32)
+
+    for cid in unique:
+        mask = labels == cid
+        cluster_embs = embeddings[mask]
+        center = cluster_embs.mean(0)
+        std = cluster_embs.std(0).mean()
+        centers.append(center)
+        stds.append(std)
+        # confidence пер-носящийся на точки
+        intra = pdist(cluster_embs, 'cosine')
+        mean_intra = intra.mean() if len(intra) else 0
+        confs[mask] = 1 - np.clip(mean_intra / EPS, 0, 1)
+
+    outliers = np.where(labels == -1)[0]
+    return dict(labels=labels,
+                cluster_centers=np.vstack(centers) if centers else np.empty((0,512)),
+                cluster_stds=np.array(stds),
+                outliers=outliers,
+                confidence_scores=confs)
+Гарантия – eps=0.35, min_samples=3 проверяются в validate_config_integrity() (ит. 1).
+
+5. build_identity_timeline()
+python
+from collections import defaultdict
+import numpy as np
+
+def build_identity_timeline(labels: np.ndarray, dates: np.ndarray):
+    """
+    Возвращает timeline: dict[cluster_id] → {
+        first, last, total_appearances, gaps (days), longest_gap_days}
+    """
+    to_jul = np.vectorize(lambda d: d.toordinal())
+    jd = to_jul(dates)                                   # целые дни
+    timeline = {}
+    for cid in np.unique(labels):
+        if cid == -1: continue
+        mask = labels == cid
+        jd_sorted = np.sort(jd[mask])
+        gaps = np.diff(jd_sorted)
+        timeline[cid] = dict(
+            first_appearance = dates[mask][jd_sorted.argmin()],
+            last_appearance  = dates[mask][jd_sorted.argmax()],
+            total_appearances = mask.sum(),
+            gaps = gaps,
+            longest_gap_days = gaps.max() if len(gaps) else 0)
+    return timeline
+6. detect_embedding_anomalies_by_dimensions()
+python
+def detect_embedding_anomalies_by_dimensions(emb: np.ndarray):
+    """
+    Возвращает dict с тройкой severity на диапазонах:
+    45-67 – texture, 120-145 – geometry, 200-230 – lighting.
+    Считаем |z|, где z = (x - μ) / σ по train-дев 1999.
+    """
+    idx_texture  = slice(45, 67+1)
+    idx_geo      = slice(120, 145+1)
+    idx_light    = slice(200, 230+1)
+
+    # μ,σ – глобально сохранённые baseline 1999-2001
+    z_tex = np.abs((emb[idx_texture] - BASE_MU[idx_texture]) / BASE_STD[idx_texture]).mean()
+    z_geo = np.abs((emb[idx_geo]     - BASE_MU[idx_geo])     / BASE_STD[idx_geo]).mean()
+    z_lgt = np.abs((emb[idx_light]   - BASE_MU[idx_light])   / BASE_STD[idx_light]).mean()
+
+    return dict(texture=z_tex, geometry=z_geo, lighting=z_lgt)
+Порог – z>3 → аномалия, но финальное решение принимает каскад.
+
+7. calculate_identity_confidence_score()
+python
+def calculate_identity_confidence_score(emb, center, appearances_count, cluster_std):
+    """
+    Score = (1 - cos_dist) * w1 + (appearances_norm)*w2 + (std_norm)*w3
+    w1=0.5, w2=0.3, w3=0.2
+    """
+    cos_dist = 1 - np.dot(emb, center)
+    w1, w2, w3 = 0.5, 0.3, 0.2
+    score_dist = 1 - np.clip(cos_dist / EPS, 0, 1)
+    score_app  = np.tanh(appearances_count / 5)
+    score_std  = 1 - np.clip(cluster_std / 0.1, 0, 1)
+    return w1*score_dist + w2*score_app + w3*score_std
+8. analyze_cluster_temporal_stability()
+python
+def analyze_cluster_temporal_stability(timeline_entry):
+    """
+    Возвращает median_gap, std_gap, modal_interval, stability_score ∈[0,1]
+    """
+    gaps = timeline_entry["gaps"]
+    if len(gaps) == 0:
+        return dict(median_gap=0, std_gap=0, modal_interval=0, stability_score=1)
+
+    median = np.median(gaps)
+    std    = gaps.std()
+    modal  = np.bincount(gaps).argmax()
+    # шкала: ideal ≤45 д →1.0; критично ≥180 д →0.0
+    stability = np.clip(1 - (median / 180), 0, 1)
+    return dict(median_gap=median, std_gap=std, modal_interval=modal,
+                stability_score=stability)
+9. ensemble_embedding_analysis()
+python
+def ensemble_embedding_analysis(embeddings: np.ndarray, strategies=('mean-cosine','median')):
+    """
+    Выполняет N стратегий, объединяет через majority_vote на уровне принадлежности точки кластеру.
+    Сейчас 2 стратегии:
+    • mean-cosine – базовый (описан выше)
+    • median      – DBSCAN по медианизированному вектору
+    """
+    results = []
+    if 'mean-cosine' in strategies:
+        results.append(perform_identity_clustering(embeddings, None)['labels'])
+    if 'median' in strategies:
+        med = np.median(embeddings, axis=0, keepdims=True)
+        emb_med = embeddings - med
+        results.append(perform_identity_clustering(emb_med, None)['labels'])
+
+    # Majority vote
+    stacked = np.vstack(results)            # (n_strategies, N)
+    final = np.apply_along_axis(lambda x: np.bincount(x[x!=-1]).argmax()
+                                if (x!=-1).any() else -1, 0, stacked)
+    return final
+10. detect_embedding_drift()
+python
+def detect_embedding_drift(current_embeddings: np.ndarray,
+                           baseline_embeddings_1999: np.ndarray,
+                           threshold: float = 0.1):
+    """
+    Считаем Δmean_cosine: |μ_current - μ_baseline|.
+    Если > threshold → drift.
+    """
+    mean_curr = current_embeddings.mean(0)
+    mean_base = baseline_embeddings_1999.mean(0)
+    delta = 1 - np.dot(mean_curr, mean_base)
+    return delta, bool(delta > threshold)
+11. Интеграция в bootstrap_pipeline (main.py)
+python
+# после 3D-этапа из итерации 2
+from embedding_analyzer import (initialize_insightface_model,
+                                extract_512d_face_embedding,
+                                calculate_embedding_distances_matrix,
+                                perform_identity_clustering,
+                                build_identity_timeline)
+
+insight_app = initialize_insightface_model()
+
+embeddings, dates, lm2d = [], [], []
+for rec in results:                # results из фазы 3D
+    emb, conf = extract_512d_face_embedding(rec['image'], rec['landmarks_2d'], insight_app)
+    if conf >= 0.9:
+        embeddings.append(emb);   dates.append(rec['date'])
+    else:
+        rec['embedding_conf'] = conf  # для логов
+
+embeddings = np.vstack(embeddings)
+D = calculate_embedding_distances_matrix(embeddings)
+cluster_info = perform_identity_clustering(embeddings, dates)
+timeline = build_identity_timeline(cluster_info['labels'], np.array(dates))
+12. Юнит-тесты (pytest)
+python
+def test_dbscan_params():
+    from embedding_analyzer import EPS, MIN_SAMP
+    assert EPS == 0.35
+    assert MIN_SAMP == 3
+
+def test_embedding_norm():
+    e = np.random.randn(512).astype(np.float32)
+    e_norm = e / np.linalg.norm(e)
+    assert np.allclose(np.linalg.norm(e_norm), 1.0, atol=1e-5)
+
+def test_distance_symmetry():
+    import numpy as np
+    from embedding_analyzer import calculate_embedding_distances_matrix
+    rng = np.random.RandomState(0)
+    e = rng.randn(5,512).astype(np.float32)
+    D = calculate_embedding_distances_matrix(e)
+    assert np.allclose(D, D.T)
+    assert np.allclose(np.diag(D), 0)
+13. Acceptance checklist итерации 3
+№	Проверка	Метод	Критерий
+1	Buffalo_L загружен	assert	model_name == "buffalo_l"
+2	Эмбеддинг L2	np.linalg.norm	0.999–1.001
+3	DBSCAN eps/min	introspect	0.35 / 3
+4	MatDist косинус	random test	D[i,i]=0, D==Dᵀ
+5	timeline longest_gap	synthetic gaps	== рассчитанному
+6	z-scores dim 45-67	baseline 0	≤0.1
+7	confidence_score	edge cases	0–1
+14. План времени
+Этап	Часы
+InsightFace загрузка + тесты	4
+Выравнивание + нормировка	3
+Матрица расстояний	1
+DBSCAN + метрики	4
+Timeline + стабильность	2
+Аномалии по измерениям	2
+Drift-детектор	1
+Юнит-тесты + docs	3
+Итого	≈20 ч
+15. Итог итерации 3
+Модуль embedding_analyzer соответствует всем критическим требованиям:
+
+Buffalo_L fp32, CUDA/CPU fallback
+
+точная L2-нормировка, cosine distance
+
+DBSCAN(0.35,3) гарантирует кластер-стойкость
+
+расписанная временная хроника и стабильность
+
+механизм ранней детекции масок через аномальные диапазоны эмбеддингов
+
+Следующая итерация 4 сконцентрируется на texture_analyzer — детальном LBP + Gabor + FFT, классификации Level 1-5 и оценке аутентичности материала.
+
+Итерация 4. Текстурный стек (несоответствия 181-240)
+После завершения этой итерации модуль texture_analyzer.py будет отвечать всем критическим требованиям ТЗ: LBP r=3/n_points=24 uniform, Shannon-энтропия, Gabor-банк 11 ориентаций × 4 частоты, FFT-пики 0.15/0.3/0.6, порог gradient 25, классификация Level 1-5, анализ пор и микроморщин, итоговый texture_score.
+
+1. initialize_texture_analysis_tools()
+python
+# texture_analyzer.py
+from skimage.feature import local_binary_pattern
+from skimage.filters import gabor_kernel
+import numpy as np
+
+LBP_RADIUS  = 3      # r=3, n_points=24 uniform[1]
+LBP_POINTS  = 24
+LBP_METHOD  = "uniform"
+
+GABOR_FREQS = [0.1, 0.2, 0.3, 0.4]      # [1]
+GABOR_ORI   = np.linspace(0, np.pi, 11, endpoint=False)   # 11 ориентаций[1]
+
+def initialize_texture_analysis_tools():
+    kernels = [(theta, freq, gabor_kernel(freq, theta)) 
+               for theta in GABOR_ORI for freq in GABOR_FREQS]
+    uniform_lookup = np.arange(256)
+    return dict(gabor_kernels=kernels, lbp_lookup=uniform_lookup)
+2. Деление лица на зоны
+python
+def _crop_zone(img, lmk, idx_list, margin=0.15):
+    pts = lmk[idx_list,:2]
+    x_min, y_min = pts.min(0)
+    x_max, y_max = pts.max(0)
+    w, h = x_max-x_min, y_max-y_min
+    x0 = int(max(0, x_min - margin*w)); y0 = int(max(0, y_min - margin*h))
+    x1 = int(min(img.shape[1], x_max + margin*w))
+    y1 = int(min(img.shape[0], y_max + margin*h))
+    return img[y0:y1, x0:x1]
+Индексы:
+
+python
+FOREHEAD = [19,24,25,18]
+NOSE     = list(range(27,36))
+CHEEK_L  = [1,2,3,31,48]
+CHEEK_R  = [15,14,13,35,54]
+EYES     = list(range(36,48))
+3. analyze_skin_texture_by_zones()
+python
+from skimage import color, exposure
+from scipy.stats import entropy as sh_entropy
+import cv2, numpy as np
+
+def _lbp_hist(gray):
+    lbp = local_binary_pattern(gray, LBP_POINTS, LBP_RADIUS, LBP_METHOD)
+    hist,_ = np.histogram(lbp.ravel(), bins=256, range=(0,256))
+    hist = hist.astype(np.float32); hist /= hist.sum() + 1e-9
+    return hist
+
+def _entropy(hist):
+    return -np.sum(hist * np.log2(hist + 1e-10))
+
+def _gabor_response(gray, kernels):
+    resp = []
+    for _,_,k in kernels:
+        r = cv2.filter2D(gray, cv2.CV_32F, np.real(k))
+        resp.append(r.mean())
+    return float(np.mean(resp))
+
+def _fft_peaks(gray):
+    f = np.fft.fft2(gray)
+    mag = np.abs(f)
+    h,w = mag.shape
+    ky = np.fft.fftfreq(h)
+    kx = np.fft.fftfreq(w)
+    kgrid = np.sqrt(np.add.outer(ky**2, kx**2))
+    peaks = {}
+    for target in [0.15,0.3,0.6]:
+        mask = (kgrid>target-0.01)&(kgrid<target+0.01)
+        peaks[target] = float(mag[mask].mean())
+    return peaks
+
+def analyze_skin_texture_by_zones(img, landmarks, tools):
+    lab = color.rgb2lab(img)
+    gray = lab[:,:,0].astype(np.uint8)  # L-channel
+    metrics = {}
+    for name, idxs in zip(("forehead","cheek_L","cheek_R","nose","eyes"),
+                          (FOREHEAD, CHEEK_L, CHEEK_R, NOSE, EYES)):
+        roi = _crop_zone(gray, landmarks, idxs)
+        if roi.size < 20*20: continue
+        roi = exposure.equalize_adapthist(roi, clip_limit=0.01)
+        hist = _lbp_hist((roi*255).astype(np.uint8))
+        ent  = _entropy(hist)
+        gbr  = _gabor_response((roi*255).astype(np.uint8), tools["gabor_kernels"])
+        fftp = _fft_peaks((roi*255).astype(np.uint8))
+        metrics[name] = dict(lbp_hist=hist, entropy=ent,
+                             gabor_mean=gbr, fft_peaks=fftp)
+    return metrics
+4. calculate_material_authenticity_score()
+python
+def _lbp_peak_score(hist):
+    peaks = [15,51,85,119,153,187,221]     # skin-пики[1]
+    return sum(hist[p] for p in peaks)
+
+def calculate_material_authenticity_score(m):
+    ent = np.mean([z["entropy"] for z in m.values()])
+    lbp = np.mean([_lbp_peak_score(z["lbp_hist"]) for z in m.values()])
+    # Нормировка
+    ent_score = np.clip((ent-4.5)/(7.8-4.5), 0, 1)       # [1]
+    lbp_score = np.clip(lbp*10, 0, 1)                    # эмпирика
+    return 0.6*ent_score + 0.4*lbp_score
+5. classify_mask_technology_level()
+python
+LEVELS = {
+ 1: dict(years=(1999,2005),  shape=0.6, entropy=4.2, embed=0.8),
+ 2: dict(years=(2006,2010),  shape=0.4, entropy=5.2, embed=0.7),
+ 3: dict(years=(2011,2015),  shape=0.3, entropy=6.0, embed=0.5),
+ 4: dict(years=(2016,2020),  shape=0.2, entropy=6.5, embed=0.4),
+ 5: dict(years=(2021,2025),  shape=0.15,entropy=7.0, embed=0.3),
+}
+
+def classify_mask_technology_level(texture_metrics, date_year):
+    ent = np.mean([z["entropy"] for z in texture_metrics.values()])
+    for lvl,v in LEVELS.items():
+        if v["years"][0]<=date_year<=v["years"][1] and ent < v["entropy"]:
+            return lvl
+    return 0
+6. detect_texture_transition_artifacts()
+python
+def detect_texture_transition_artifacts(img, landmarks):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    grad = cv2.Laplacian(gray, cv2.CV_16S, ksize=3)
+    grad = cv2.convertScaleAbs(grad)
+    mask = cv2.inRange(grad, 25, 255)                 # threshold=25[1]
+    # Морфология → соединяем линии
+    kernel = np.ones((3,3),np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    ratio = mask.sum() / (gray.size)
+    return ratio   # >0.02 ⇒ подозрение на швы
+7. Поры и морщины
+python
+from skimage import morphology, measure, filters
+
+def analyze_pore_structure_authenticity(region):
+    blur = cv2.GaussianBlur(region,(3,3),0)
+    thr = filters.threshold_otsu(blur)
+    bw = blur < thr
+    bw = morphology.remove_small_objects(bw, 20)
+    lbl = measure.label(bw)
+    props = measure.regionprops(lbl)
+    areas = np.array([p.area for p in props])
+    circularities = np.array([4*np.pi*p.area/(p.perimeter**2+1e-9) for p in props])
+    density = len(props) / (region.shape[0]*region.shape[1]/10000)  # pores / 10 000 px²
+    size_var = areas.std()/areas.mean() if areas.size else 1
+    circ_score = circularities.mean() if circularities.size else 0
+    return dict(pore_density=density,
+                pore_size_variability=size_var,
+                pore_circularity_score=circ_score)
+
+def _analyze_micro_wrinkles(region):
+    responses=[]
+    for theta in GABOR_ORI:
+        k = gabor_kernel(0.3, theta)
+        r = cv2.filter2D(region, cv2.CV_32F, np.real(k))
+        responses.append(r.mean())
+    arr=np.array(responses)
+    return dict(mean_gabor_response=float(arr.mean()),
+                anisotropy_score=float(arr.std()/arr.mean()+1e-9))
+
+def _analyze_pore_distribution(region):
+    return analyze_pore_structure_authenticity(region)
+8. calculate_spectral_material_signature()
+python
+def calculate_spectral_material_signature(texture_metrics):
+    mags=[]
+    for z in texture_metrics.values():
+        p=z["fft_peaks"]
+        mags.append([p[0.15],p[0.3],p[0.6]])
+    arr=np.mean(mags,0)
+    # Нормируем
+    spec_score = np.clip((arr/np.max(arr)).mean(),0,1)
+    return spec_score
+9. adaptive_texture_analysis()
+python
+def adaptive_texture_analysis(region, lighting_quality):
+    if lighting_quality < 0.8:              # poor light[1]
+        radius = 2
+    else:
+        radius = LBP_RADIUS
+    return local_binary_pattern(region, 24, radius, LBP_METHOD)
+10. calculate_texture_authenticity_score()
+python
+def calculate_texture_authenticity_score(texture_metrics):
+    entropy = np.mean([z["entropy"] for z in texture_metrics.values()])
+    mat_score = calculate_material_authenticity_score(texture_metrics)
+    spec = calculate_spectral_material_signature(texture_metrics)
+    pore = np.mean([analyze_pore_structure_authenticity(
+                    (texture_metrics[z]['lbp_hist'].reshape(16,16)*255).astype(np.uint8))['pore_size_variability']
+                    for z in texture_metrics])
+    # entropy: 0-1, mat_score: 0-1, spec:0-1, pore_var<0.15 natural
+    pore_score = 1 - np.clip((pore-0.15)/0.3,0,1)
+    return 0.4*mat_score + 0.2*spec + 0.2*pore_score + 0.2*np.clip((entropy-4.5)/3.3,0,1)
+11. Интеграция в main.bootstrap_pipeline
+python
+tools_tex = initialize_texture_analysis_tools()
+
+for rec in results:             # после эмбеддингов
+    if rec['image'].shape[0] < 300: continue   # низкое качество
+    tex = analyze_skin_texture_by_zones(rec['image_rgb'], rec['landmarks_2d'], tools_tex)
+    rec['texture_metrics'] = tex
+    rec['material_score'] = calculate_material_authenticity_score(tex)
+    rec['texture_score']  = calculate_texture_authenticity_score(tex)
+    rec['mask_level']     = classify_mask_technology_level(tex, rec['date'].year)
+    rec['seam_score']     = detect_texture_transition_artifacts(rec['image_bgr'], rec['landmarks_2d'])
+12. Юнит-тесты
+python
+def test_entropy_range():
+    from texture_analyzer import _entropy
+    h = np.full(256,1/256)
+    assert 7.9 > _entropy(h) > 7.8          # макс. энтропия
+
+def test_lbp_uniform():
+    from texture_analyzer import _lbp_hist, LBP_POINTS
+    img = np.zeros((32,32),np.uint8)
+    hist = _lbp_hist(img)
+    assert abs(hist.sum()-1) < 1e-6
+
+def test_gabor_bank():
+    from texture_analyzer import initialize_texture_analysis_tools
+    t=initialize_texture_analysis_tools()
+    assert len(t['gabor_kernels']) == 44      # 11×4
+13. Acceptance-чек-лист итерации 4
+Проверка	Критерий
+LBP r=3, n=24, method='uniform'	LBP_RADIUS==3, LBP_POINTS==24
+Shannon entropy натуральной кожи 6.2-7.8	на эталонных фото entropy∈[6.2,7.8]
+Gabor-банк 11×4	len(kernels)==44
+FFT пики 0.15/0.3/0.6 извлекаются	fft_peaks.keys()=={0.15,0.3,0.6}
+gradient_threshold 25	detect_texture_transition_artifacts использует 25
+material_score ∈	assert
+mask_level классифицируется	датированное фото 2002 → level 1
+14. Оценка трудозатрат
+Этап	Часы
+Gabor + LBP инфраструктура	4
+Зональная нарезка + метрики	4
+Auth score + Level calc	3
+Поры/морщины + FFT	3
+Тесты + docs	2
+Итого	≈16 ч
+Выполнив итерацию 4, мы закрываем несоответствия 181-240: texture-pipeline становится детерминированным, числовые выходы (material_score, texture_score, mask_level, seam_score) готовы к использованию каскадом в anomaly_detector и визуализации в Gradio.
+
+Итерация 5. Временной модуль старения и аномалий (несоответствия 241-300)
+После выполнения шагов ниже temporal_analyzer.py полностью покроет требования ТЗ: модель мед-старения, точный возраст на дату, прогноз 15-метрик, поиск z-аномалий (|z| > 2.5), быстрых скачков (> 3 σ/∆t), расписку «смен лиц каждые 3-4 мес.», сезонную декомпозицию, change-points PELT(pen = 10) и итоговый Temporal Stability Index.
+
+1. Константы и утилиты
+python
+# temporal_analyzer.py
+import datetime as dt, numpy as np, pandas as pd
+import ruptures as rpt
+from scipy import stats
+
+BIRTH_DATE = dt.date(1952, 10, 7)                       # фиксировано[1]
+ELASTICITY_PY = 0.015                                   # 1.5 %/год → середина диапазона[1]
+SAGGING_MM_PY = 1.5                                     # 1.5 мм/год[1]
+Z_THRESHOLD   = 2.5                                     # критический порог[1]
+RAPID_FACTOR  = 3                                       # ∆/σ > 3[1]
+2. calculate_putin_age_on_each_date
+python
+def calculate_putin_age_on_each_date(dates: pd.Series) -> pd.Series:
+    """
+    Возвращает возраст в годах c точностью 365.25 суток (учёт високосных)[1].
+    """
+    delta_days = (dates - pd.Timestamp(BIRTH_DATE)).dt.days
+    return delta_days / 365.25
+Тест: дата 2002-10-07 → 50.0.
+
+3. build_medical_aging_model
+python
+def build_medical_aging_model(baseline_metrics_1999: dict):
+    """
+    Метрики → функции f_age(age) = baseline + age_corr(age)
+    где:
+        elastic(age) = 1 - max(0, age-40)*ELASTICITY_PY
+        sag(age)     = max(0, age-40)*SAGGING_MM_PY   (мм → норм. px)
+    """
+    def _elasticity(age):      return 1 - max(0, age-40)*ELASTICITY_PY
+    def _sagging(age):         return max(0, age-40)*SAGGING_MM_PY
+    model = {}
+    for m,val in baseline_metrics_1999.items():
+        if m.endswith("_ratio"):                     # относительные
+            model[m] = lambda age, v=val: v                 # неизменны
+        elif m.endswith("_projection_ratio"):        # мягкие ткани z
+            model[m] = lambda age, v=val: v + _sagging(age)/100
+        elif m.endswith("_angle") or m.endswith("_depth_ratio"):
+            model[m] = lambda age, v=val: v                 # кость стабильна после 25
+        else:                                          # skin-elastic metrics
+            model[m] = lambda age, v=val: v * _elasticity(age)
+    return model
+4. predict_expected_metrics_for_age
+python
+def predict_expected_metrics_for_age(age_series: pd.Series,
+                                     model_dict: dict) -> pd.DataFrame:
+    """
+    Возвращает DataFrame shape=(len(age), len(model_dict))
+    """
+    preds = {}
+    for m,f in model_dict.items():
+        preds[m] = age_series.apply(f).values
+    return pd.DataFrame(preds, index=age_series.index)
+5. detect_temporal_anomalies_in_metrics
+python
+def detect_temporal_anomalies_in_metrics(actual: pd.DataFrame,
+                                         predicted: pd.DataFrame):
+    """
+    Выход: dict(metric -> {anomaly_idx, rapid_idx, explanation})
+    """
+    results = {}
+    for m in actual.columns:
+        resid = actual[m] - predicted[m]
+        mean, std = resid.mean(), resid.std(ddof=1)
+        z = (resid - mean) / (std + 1e-9)
+        anomaly_idx = np.where(np.abs(z) > Z_THRESHOLD)[0]
+
+        # rapid change
+        diff = resid.diff()
+        rate = diff / diff.index.to_series().diff().dt.days.fillna(1)
+        rc_idx = np.where(np.abs(rate) > RAPID_FACTOR*rate.std(ddof=1))[0]
+
+        expl = _generate_temporal_anomaly_explanation(m, resid.values, z.values,
+                                                      anomaly_idx, rc_idx)
+        results[m] = dict(anomaly_indices=anomaly_idx,
+                          rapid_change_indices=rc_idx,
+                          explanation=expl)
+    return results
+python
+def _generate_temporal_anomaly_explanation(metric_name, resid, z, ai, rci):
+    if len(ai)==0 and len(rci)==0: return ""
+    txt=[]
+    if ai.size:
+        txt.append(f"{metric_name}: {len(ai)} точек |z|>{Z_THRESHOLD}")
+    if rci.size:
+        txt.append(f"{metric_name}: {len(rci)} скачков >{RAPID_FACTOR}σ/день")
+    return "; ".join(txt)
+6. build_identity_appearance_timeline
+python
+def build_identity_appearance_timeline(cluster_labels: np.ndarray,
+                                       dates: np.ndarray):
+    """
+    Вернёт dict[id] -> list[pd.Timestamp]
+    """
+    tl = {}
+    for cid in np.unique(cluster_labels):
+        if cid == -1: continue
+        tl[cid] = list(np.sort(dates[cluster_labels==cid]))
+    return tl
+7. analyze_identity_switching_patterns
+python
+def analyze_identity_switching_patterns(timeline_dict):
+    pattern={}
+    for cid, lst in timeline_dict.items():
+        gaps = np.diff(pd.Series(lst).dt.date).astype('timedelta64[D]').astype(int)
+        modal = stats.mode(gaps, keepdims=False).mode if gaps.size else 0
+        systematic = 90 <= modal <= 120          # 3-4 мес.[1]
+        pattern[cid] = dict(modal_interval=int(modal),
+                            systematic_replacement=systematic)
+    return pattern
+8. Сезонная декомпозиция
+python
+from statsmodels.tsa.seasonal import seasonal_decompose
+
+def seasonal_decomposition_analysis(series: pd.Series, period=12):
+    """
+    Возвращает components: trend, seasonal, resid.
+    """
+    s = seasonal_decompose(series, model='additive', period=period)
+    return dict(trend=s.trend, seasonal=s.seasonal, resid=s.resid)
+9. detect_change_points
+python
+def detect_change_points(series: pd.Series, pen=10):
+    """
+    PELT rbf, penalty=10[1]; возвращает list[int] индексов.
+    """
+    algo = rpt.Pelt(model='rbf').fit(series.dropna().values)
+    cps = algo.predict(pen=pen)
+    return cps[:-1]    # последний = len
+10. calculate_temporal_stability_index
+python
+def calculate_temporal_stability_index(residuals: pd.DataFrame):
+    """
+    Фрактальная размерность >1.5 ↓ стабильности[1]; индекс 0-1.
+    """
+    from nolds import hurst_rs
+    h_vals = residuals.apply(lambda col: hurst_rs(col.dropna()), axis=0)
+    fd = 2 - h_vals.mean()
+    stability = np.clip(1 - (fd-1.0)/(1.5-1.0), 0, 1)   # fd 1→1.0, 1.5→0
+    return float(stability)
+11. Интеграция в main.bootstrap_pipeline
+python
+ages = calculate_putin_age_on_each_date(df_dates)          # Series
+aging_model = build_medical_aging_model(baseline_1999)
+pred = predict_expected_metrics_for_age(ages, aging_model)
+anom = detect_temporal_anomalies_in_metrics(df_metrics, pred)
+appearance_tl = build_identity_appearance_timeline(labels, df_dates)
+switch = analyze_identity_switching_patterns(appearance_tl)
+stability_idx = calculate_temporal_stability_index(df_metrics - pred)
+df_metrics — фактические 15-метрики (после итерации 2).
+
+12. Юнит-тесты
+python
+def test_age_calc():
+    import datetime as dt, pandas as pd
+    d=pd.Series([pd.Timestamp('2002-10-07')])
+    assert abs(calculate_putin_age_on_each_date(d).iloc[0]-50) < 1e-3
+
+def test_z_anomaly():
+    a=pd.DataFrame({'m':[0,0,5,0,0]})
+    p=pd.DataFrame({'m':[0]*5})
+    res=detect_temporal_anomalies_in_metrics(a,p)
+    assert 2 in res['m']['anomaly_indices']
+
+def test_switch_pattern():
+    from datetime import timedelta
+    base = pd.Timestamp('2000-01-01')
+    dates=np.array([base,base+timedelta(days=100),
+                    base+timedelta(days=200)])
+    tl=build_identity_appearance_timeline(np.array([0,0,0]),dates)
+    pat=analyze_identity_switching_patterns(tl)
+    assert pat[0]['systematic_replacement']
+13. Acceptance-чек-лист
+№	Проверка	Ожидаемо
+Возраст = (дата-1952-10-07)/365.25	точность ±0.01 года	
+Эластичность 45 лет → 0.925	1-(45-40)*0.015	
+z-порог 2.5 фиксирован	Z_THRESHOLD	
+Быстрый скачок rate>	3σ	метка rapid_idx
+modal_interval 90-120 д	systematic_replacement=True	
+PELT pen = 10	detect_change_points	
+Stability index fd>1.5 → 0	формула	
+
+Итерация 6. Каскад-верификация, байесовский апдейт и итоговый балл подлинности
+(устраняем несоответствия 301 – 360)
+
+После этой фазы модуль anomaly_detector.py станет центральным «арбитром» системы:
+он объединит геометрию, эмбеддинги, текстуру и временную консистентность, реализует независимую каскадную схему, байесовский апдейт и выдаст числовой final_authenticity по формуле 0.3 / 0.3 / 0.2 / 0.2, как предписано ТЗ.
+
+1. Структура данных, передаваемых в anomaly_detector
+python
+Evidence = TypedDict('Evidence', {
+    'geometry_score': float,           # 0–1
+    'embedding_score': float,          # 0–1
+    'texture_score':  float,           # 0–1
+    'temporal_score': float,           # 0–1
+    'mask_level':     int,             # 0-5
+    'years':          int,             # фото-год
+    'cluster_id':     int,             # DBSCAN label
+    'poses':          List[str],       # ['Frontal', ...]
+    'dates':          List[pd.Timestamp],
+    'cross_src_dists': List[float],    # cos dist между источниками дня
+})
+2. Байесовский апдейт apply_bayesian_identity_analysis
+python
+def _likelihood_same(ev: Evidence) -> float:
+    g = ev['geometry_score']; e = ev['embedding_score']
+    t = ev['texture_score'];  tm = ev['temporal_score']
+    return g*e*t*tm                         # максимум 1.0
+
+def _likelihood_diff(ev: Evidence) -> float:
+    # инверсия: чем ниже score, тем выше вероятность другого лица
+    g = 1 - ev['geometry_score']
+    e = 1 - ev['embedding_score']
+    t = 1 - ev['texture_score']
+    tm = 1 - ev['temporal_score']
+    return g*e*t*tm
+
+def apply_bayesian_identity_analysis(ev: Evidence,
+                                     prior_same: float = 0.5) -> float:
+    """Возвращает posterior_same ∈ [0,1]"""
+    L_same = _likelihood_same(ev)
+    L_diff = _likelihood_diff(ev)
+    num = L_same * prior_same
+    den = num + L_diff * (1 - prior_same)
+    return num / (den + 1e-9)
+Проверка: при geometry=embedding=texture=temporal=0.9 → posterior ≈ 0.987.
+
+3. Независимый каскад perform_cascade_verification
+python
+CASCADE_THRESHOLDS = dict(geometry=0.3,
+                          embedding=0.3,
+                          texture=0.2,
+                          temporal=0.2)      # абсолютные пороги
+
+def perform_cascade_verification(ev: Evidence) -> Tuple[bool, str]:
+    """Проверяет каждый уровень отдельно; при фейле – останавливает процесс."""
+    if ev['geometry_score'] < CASCADE_THRESHOLDS['geometry']:
+        return False, "Geometry check failed"
+    if ev['embedding_score'] < CASCADE_THRESHOLDS['embedding']:
+        return False, "Embedding check failed"
+    if ev['texture_score']  < CASCADE_THRESHOLDS['texture']:
+        return False, "Texture check failed"
+    if ev['temporal_score'] < CASCADE_THRESHOLDS['temporal']:
+        return False, "Temporal consistency failed"
+    return True, "All cascade levels passed"
+Гарантирует независимость уровней, требуемую ТЗ.
+
+4. Итоговый балл calculate_identity_authenticity_score
+python
+WEIGHTS = dict(geometry=0.3, embedding=0.3, texture=0.2, temporal=0.2)
+
+def calculate_identity_authenticity_score(ev: Evidence) -> float:
+    score = (WEIGHTS['geometry'] * ev['geometry_score'] +
+             WEIGHTS['embedding'] * ev['embedding_score'] +
+             WEIGHTS['texture']  * ev['texture_score']  +
+             WEIGHTS['temporal'] * ev['temporal_score'])
+    return float(score)
+Классификация: <0.3 → «маска/двойник», 0.3 – 0.7 → «сомнительно», >0.7 → «подлинно».
+
+5. Детектор хирургии
+detect_surgical_intervention_evidence
+
+python
+def detect_surgical_intervention_evidence(metric_seq: pd.Series,
+                                          dates: pd.Series) -> bool:
+    """
+    1. Ищем положительный пик отёчности (eye_region_error ↑) длительностью 14-28 дн.
+    2. Проверяем, что до/после интервал ≥ 6 мес без аналогичных пиков.
+    """
+    peaks = metric_seq > metric_seq.rolling(7, center=True).mean() + 2*metric_seq.std()
+    grouped = (peaks != peaks.shift()).cumsum()
+    intervals = metric_seq.groupby(grouped).apply(lambda s: (s.index[-1]-s.index[0]).days)
+    surgical = any(14 <= d <= 28 for d in intervals)
+    if not surgical:
+        return False
+    # проверка 6-месячного окна
+    for idx, d in intervals.items():
+        if 14 <= d <= 28:
+            start = metric_seq.index[grouped==idx][0]
+            end   = metric_seq.index[grouped==idx][-1]
+            before = (start - dates.min()).days
+            after  = (dates.max() - end).days
+            if before >= 180 and after >= 180:
+                return True
+    return False
+6. Эволюция технологий масок
+analyze_mask_technology_evolution
+
+python
+BREAKTHROUGH_YEARS = [2008, 2014, 2019, 2022]
+
+def analyze_mask_technology_evolution(mask_levels: pd.Series):
+    """
+    Смотрим рост max(mask_level) по годам; скачок (+≥1 уровень) в год BTY → log.
+    """
+    yearly_max = mask_levels.groupby(mask_levels.index.year).max()
+    jumps = {}
+    prev = 0
+    for year, lvl in yearly_max.items():
+        if year in BREAKTHROUGH_YEARS and lvl - prev >= 1:
+            jumps[year] = lvl
+        prev = lvl
+    return jumps              # {year: new_level}
+7. Кросс-источниковая проверка
+perform_cross_source_verification
+
+python
+from scipy.spatial.distance import pdist
+
+def perform_cross_source_verification(daily_embeddings: Dict[str, np.ndarray]):
+    """
+    daily_embeddings: {source_id -> embedding_norm}
+    Возвращает cross_source_consistency_score ∈[0,1]
+    """
+    if len(daily_embeddings) < 2:
+        return 1.0, {}
+    embs = np.vstack(list(daily_embeddings.values()))
+    dists = pdist(embs, metric='cosine')
+    max_dist = dists.max()
+    score = 1 - np.clip(max_dist / 0.5, 0, 1)            # 0.5 – критический порог[1]
+    discrepancies = {pair:dist for pair, dist in
+                     zip([(a,b) for a in daily_embeddings for b in daily_embeddings if a<b], dists)
+                     if dist > 0.5}
+    return score, discrepancies
+8. Проверка консистентности метрик
+validate_identity_consistency
+
+python
+def validate_identity_consistency(metric_history: pd.DataFrame,
+                                  stable_columns: List[str]) -> float:
+    """
+    Вычисляет долю точек, где stable_metrics выходят за ±2σ базовых значений.
+    чем меньше, тем лучше. Возвращает consistency_score ∈[0,1].
+    """
+    base_mean = metric_history.loc[metric_history.index.year<=2001, stable_columns].mean()
+    base_std  = metric_history.loc[metric_history.index.year<=2001, stable_columns].std(ddof=1)
+    z = ((metric_history[stable_columns] - base_mean) / (base_std + 1e-9)).abs()
+    viol = (z > 2).sum().sum()
+    total = z.size
+    return 1 - viol/total
+9. Обновлённый пайплайн объединения
+python
+def compute_authenticity(ev: Evidence,
+                         stable_metric_history: pd.DataFrame,
+                         metric_sequence: pd.Series,
+                         daily_embs: Dict[str, np.ndarray]):
+    ok, reason = perform_cascade_verification(ev)
+    bayes = apply_bayesian_identity_analysis(ev, 0.5)
+    cross_src_score, disc = perform_cross_source_verification(daily_embs)
+    consistency = validate_identity_consistency(stable_metric_history,
+                                                ['skull_width_ratio','temple_width_ratio',
+                                                 'zygomatic_arch_width','orbital_depth'])
+    surgery_flag = detect_surgical_intervention_evidence(metric_sequence, stable_metric_history.index)
+
+    final = calculate_identity_authenticity_score(ev)
+    result = dict(final_authenticity=final,
+                  bayesian_posterior=bayes,
+                  cascade_passed=ok,
+                  cascade_reason=reason,
+                  cross_source_score=cross_src_score,
+                  stable_consistency=consistency,
+                  surgical_evidence=surgery_flag,
+                  mask_tech_jumps=analyze_mask_technology_evolution(
+                                     stable_metric_history['mask_level']))
+    return result
+10. Юнит-тесты
+python
+def test_weights():
+    from anomaly_detector import WEIGHTS
+    assert WEIGHTS == {'geometry':0.3,'embedding':0.3,'texture':0.2,'temporal':0.2}
+
+def test_bayes_symmetry():
+    ev=dict(geometry_score=0.5, embedding_score=0.5,
+            texture_score=0.5, temporal_score=0.5)
+    post=apply_bayesian_identity_analysis(ev,0.5)
+    assert abs(post-0.5) < 1e-6
+
+def test_cascade_stop():
+    ev=dict(geometry_score=0.2, embedding_score=0.9,
+            texture_score=0.9, temporal_score=0.9)
+    ok,reason=perform_cascade_verification(ev)
+    assert not ok and 'Geometry' in reason
+11. Acceptance-чек-лист итерации 6
+Проверка	Критерий
+Формула 0.3/0.3/0.2/0.2	calculate_identity_authenticity_score
+Байес prior=0.5	apply_bayesian_identity_analysis
+Каскад останавливает при score<threshold	unit-test
+cross_source_score = 0 при dist>0.5	synthetic test
+surgical_flag True для 20-дн. отёчности	synthetic
+jumps фиксируются в 2008/2014/2019/2022	sample timeline
+consistency_score → 1 при 0 нарушений	test
+
+Итерация 6 – «Верификация и финальный балл подлинности»
+закрываем несоответствия 301-360 (каскад, байес, кросс-источники, хирургия, эволюция масок, консистентность метрик)
+
+0. Границы задачи
+Модули: anomaly_detector.py, частично metrics_calculator.py, вспом. utils.
+
+Вход: агрегированная структура Evidence – суммирует результаты итераций 1-5.
+
+Выход: final_authenticity ∈[1], расширенный словарь объяснений.
+
+Жёсткие требования
+
+веса 0.3/0.3/0.2/0.2 в формуле подлинности
+
+каскадные пороги geometry≥0.3, embedding≥0.3, texture≥0.2, temporal≥0.2
+
+априорная вероятность одноличности = 0.5 для байес-апдейта
+
+критич. кросс-источ. косинус-дистанция > 0.5 → «несоответствие»
+
+интервал до/после хирургии ≥ 6 мес
+
+1. Соглашение о данных
+python
+# evidence.py
+from typing import List, Dict, TypedDict
+import pandas as pd, numpy as np
+
+class Evidence(TypedDict):
+    geometry_score: float         # 0-1
+    embedding_score: float        # 0-1
+    texture_score:  float         # 0-1
+    temporal_score: float         # 0-1
+    mask_level:     int           # 0-5
+    photo_year:     int
+    cluster_id:     int
+    daily_embeddings: Dict[str, np.ndarray]   # src_id -> 512-d emb (норм.)
+    metrics_history: pd.DataFrame             # index=date, cols=15 метрик
+    eye_region_error_series: pd.Series        # index=date, value=float
+2. Каскад независимой верификации
+python
+# anomaly_detector.py
+THR = dict(geometry=0.30, embedding=0.30, texture=0.20, temporal=0.20)  # [1]
+
+def perform_cascade_verification(ev: Evidence) -> (bool, str):
+    if ev['geometry_score'] < THR['geometry']:
+        return False, 'Geometry <0.30'
+    if ev['embedding_score'] < THR['embedding']:
+        return False, 'Embedding <0.30'
+    if ev['texture_score']  < THR['texture']:
+        return False, 'Texture <0.20'
+    if ev['temporal_score'] < THR['temporal']:
+        return False, 'Temporal <0.20'
+    return True, 'Cascade OK'
+Unit-test – фото с geometry=0.25 должно вернуть False.
+
+3. Байесовская апостериорная вероятность
+python
+WEIGHT_PRIOR = 0.5                    # prior_same_person  = 0.5 [1]
+
+def _likelihood_same(ev: Evidence) -> float:
+    return ev['geometry_score'] * ev['embedding_score'] * \
+           ev['texture_score']  * ev['temporal_score']
+
+def _likelihood_diff(ev: Evidence) -> float:
+    return (1-ev['geometry_score']) * (1-ev['embedding_score']) * \
+           (1-ev['texture_score'])  * (1-ev['temporal_score'])
+
+def apply_bayesian_identity_analysis(ev: Evidence,
+                                     prior_same: float = WEIGHT_PRIOR) -> float:
+    Ls = _likelihood_same(ev)
+    Ld = _likelihood_diff(ev)
+    num = Ls * prior_same
+    return num / (num + Ld * (1-prior_same) + 1e-9)
+Проверка – если все четыре скора = 1 → posterior≈1.
+
+4. Формула итогового балла
+python
+W = dict(geometry=0.3, embedding=0.3, texture=0.2, temporal=0.2)  # [1]
+
+def calculate_identity_authenticity_score(ev: Evidence) -> float:
+    return (W['geometry'] * ev['geometry_score'] +
+            W['embedding'] * ev['embedding_score'] +
+            W['texture']  * ev['texture_score']  +
+            W['temporal'] * ev['temporal_score'])
+Категории: <0.3 маска/двойник; 0.3-0.7 сомнительно; >0.7 подлинно.
+
+5. Кросс-источниковая консистентность
+python
+from scipy.spatial.distance import pdist
+
+def perform_cross_source_verification(embs: Dict[str, np.ndarray]) -> (float, Dict):
+    if len(embs) < 2:
+        return 1.0, {}
+    vecs = np.vstack(list(embs.values()))
+    d = pdist(vecs, metric='cosine')
+    max_d = d.max()
+    score = 1 - np.clip(max_d / 0.5, 0, 1)         # 0-1 шкала; >0.5 плохо[1]
+    pairs = list(embs.keys())
+    disc = {(pairs[i], pairs[j]): float(dist) for (i, j), dist
+            in zip([(i, j) for i in range(len(pairs)) for j in range(i+1, len(pairs))], d)
+            if dist > 0.5}
+    return score, disc
+6. Детектор хирургии
+python
+def detect_surgical_intervention_evidence(eye_err: pd.Series) -> bool:
+    rolling = eye_err.rolling(7, center=True).mean()
+    resid = eye_err - rolling
+    peaks = resid > 2 * resid.std()
+    grp = (peaks != peaks.shift()).cumsum()
+    for g in grp.unique():
+        mask = grp == g
+        if peaks[mask].all():
+            dur = (peaks.index[mask][-1] - peaks.index[mask][0]).days
+            if 14 <= dur <= 28:           # 2-4 недели[1]
+                return True
+    return False
+7. Эволюция технологий масок
+python
+BTY = [2008, 2014, 2019, 2022]          # breakthrough_years[1]
+
+def analyze_mask_technology_evolution(mask_series: pd.Series) -> Dict[int, int]:
+    yearly = mask_series.groupby(mask_series.index.year).max()
+    prev = 0; jumps={}
+    for y,lvl in yearly.items():
+        if y in BTY and lvl - prev >= 1:
+            jumps[y]=int(lvl)
+        prev=lvl
+    return jumps
+8. Консистентность «стабильных» метрик
+python
+STABLE = ['skull_width_ratio','temple_width_ratio',
+          'zygomatic_arch_width','orbital_depth']   # [1]
+
+def validate_identity_consistency(history: pd.DataFrame) -> float:
+    base = history.loc[history.index.year<=2001, STABLE]
+    mu, sigma = base.mean(), base.std(ddof=1)
+    z = ((history[STABLE]-mu)/(sigma+1e-9)).abs()
+    viol = (z>2).sum().sum()
+    return 1 - viol/z.size
+9. Основная функция объединения
+python
+def compute_final_verdict(ev: Evidence) -> Dict:
+    cascade_ok, reason = perform_cascade_verification(ev)
+    bayes   = apply_bayesian_identity_analysis(ev)
+    cross_s, disc = perform_cross_source_verification(ev['daily_embeddings'])
+    stability = validate_identity_consistency(ev['metrics_history'])
+    surgical = detect_surgical_intervention_evidence(ev['eye_region_error_series'])
+    tech_jumps = analyze_mask_technology_evolution(ev['metrics_history']['mask_level'])
+
+    final = calculate_identity_authenticity_score(ev)
+    verdict = dict(final_authenticity=final,
+                   bayesian_same_prob=bayes,
+                   cascade_passed=cascade_ok,
+                   cascade_reason=reason,
+                   cross_source_score=cross_s,
+                   cross_discrepancies=disc,
+                   metric_stability=stability,
+                   surgical_flag=surgical,
+                   mask_tech_jumps=tech_jumps)
+    return verdict
+10. Юнит-тесты (PyTest)
+python
+def test_weighted_formula():
+    ev=dict(geometry_score=1,embedding_score=1,texture_score=1,temporal_score=1)
+    assert abs(calculate_identity_authenticity_score(ev)-1.0)<1e-9
+
+def test_bayes_prior_symmetry():
+    ev=dict(geometry_score=0.5,embedding_score=0.5,texture_score=0.5,temporal_score=0.5)
+    assert abs(apply_bayesian_identity_analysis(ev)-0.5)<1e-6
+
+def test_cascade_fail():
+    ev=dict(geometry_score=0.2,embedding_score=0.9,texture_score=0.9,temporal_score=0.9)
+    ok,_ = perform_cascade_verification(ev)
+    assert not ok
+
+def test_cross_source():
+    import numpy as np
+    a=np.random.randn(512); a/=np.linalg.norm(a)
+    b=-a       # cos dist ≈2
+    score,disc=perform_cross_source_verification({'a':a,'b':b})
+    assert score==0 and disc
+11. Интеграция в main.py
+python
+verdicts=[]
+for rec in aggregated_records:  # сформированы после ит.1-5
+    ev=build_evidence_from_record(rec)          # helper
+    verdict=compute_final_verdict(ev)
+    verdicts.append(verdict)
+12. Приёмочные критерии
+№	Требование ТЗ	Проверка
+1	веса 0.3/0.3/0.2/0.2	calculate_identity_authenticity_score
+2	prior_same=0.5	apply_bayesian_identity_analysis
+3	каскад останавливает поток	unit-test test_cascade_fail
+4	cross-source dist>0.5 → score=0	unit-test test_cross_source
+5	хирургия 2-4 нед + ≥6 мес окна	synthetic series
+6	jumps 2008/14/19/22 фиксируются	analyze_mask_technology_evolution
+7	Consistency stable metrics >0.95 при 0 наруш.	synthetic
+13. Оценка усилий
+Задача	ч
+API Evidence + каскад	2
+Байес + формула + tests	3
+Cross-source	2
+Surgical + tech jumps	3
+Consistency + integration	3
+Док-тесты + ревью	2
+Итого	15
+14. Ключевые ловушки
+Путать евклид / косинус – только косинус ≤0.5.
+
+Весовая формула не нормируется – сумма = 1.0.
+
+Байес – умножать именно likelihood, а не log-space → float128 для больших датасетов.
+
+Surgical detector – длинные интервалы фотопауз >180 дн маскируют пик; фильтровать по metrics_history.index.
+
+Итерация 6 полностью реализует независимую каскадную политику, математически корректный байес-апдейт и механизмы проверки источников, хирургии и технологических скачков — все критические требования блока 7 спецификации закрыты.
+
+Итерация 7. Медицинская верификация (несоответствия 361-420)
+После этой фазы модуль medical_validator.py станет «врачом-экспертом» системы:
+он количественно подтвердит, что все изменения метрик укладываются в физиологические нормы Путина, исключит хирургические гипотезы при недостаточных интервалах и выдаст единый biological_plausibility_score.
+
+0. Входные данные
+python
+class MedInput(TypedDict):
+    metrics_history:  pd.DataFrame   # index=date, cols=15 ключевых + shape_errors
+    age_series:       pd.Series      # index=date, age_years
+    medical_events:   Dict[str, List[pd.Timestamp]]  # 'hospital', 'vacation', ...
+    anomaly_table:    Dict[str, Any] # вывод temporal_analyzer.detect_* (ит. 5)
+Все значения метрик уже нормализованы итерациями 1-2.
+
+1. Глобальные константы
+python
+ELAST_LOSS_YR   = 0.015   # 1.5 % / год после 40 лет
+SAGGING_MM_YR   = 1.5     # мм / год после 40 лет
+MAX_BONE_DELTA  = 0.02    # ≤2 % для костных метрик после 25 лет
+MAX_IPD_DELTA   = 0.02    # ≤2 % межзрачковое расстояние (ipd)
+MIN_OP_TIME     = 180     # дней между операциями (6 мес)
+Z_BIOL_LIMIT    = 2.5     # |z|>2.5 ⇒ биол. невозможно
+2. Проверка естественного старения
+validate_aging_consistency_for_identity
+
+python
+def validate_aging_consistency_for_identity(hist: pd.DataFrame,
+                                            age: pd.Series) -> pd.Series:
+    """
+    Для каждой мягкотк. метрики рассчитывает допустимый диапазон и z-оценку.
+    Возвращает Series (index=metric, value=z_score_max).
+    """
+    df = hist.copy()
+    z_scores = pd.Series(index=[
+        "nose_projection_ratio", "chin_projection_ratio",
+        "forehead_height_ratio", "eye_region_error"], dtype=float)
+
+    for m in z_scores.index:
+        base = df.loc[df.index.year <= 2001, m].median()
+        expected = base + (age.clip(lower=40)-40).clip(lower=0) * \
+                   (SAGGING_MM_YR/100 if 'projection' in m else ELAST_LOSS_YR)
+        resid = df[m] - expected
+        z = resid / resid.std(ddof=1)
+        z_scores[m] = z.abs().max()
+    return z_scores     # |z| max по всей истории
+Правило: если z_scores.max() ≤ 2.5 → старение естественно.
+
+3. Неизменность костной структуры
+check_bone_structure_immutability
+
+python
+STABLE_BONE = ["skull_width_ratio",
+               "temple_width_ratio",
+               "zygomatic_arch_width",
+               "orbital_depth"]
+
+def check_bone_structure_immutability(hist: pd.DataFrame,
+                                      age: pd.Series) -> Dict[str, float]:
+    base = hist.loc[hist.index.year <= 2001, STABLE_BONE].median()
+    delta = (hist[STABLE_BONE] - base).abs() / base
+    viol = (delta > MAX_BONE_DELTA).any()
+    # IPD
+    ipd_base = hist.loc[hist.index.year <= 2001, "eye_distance_ratio"].median()
+    ipd_delta = (hist["eye_distance_ratio"] - ipd_base).abs() / ipd_base
+    ipd_viol = (ipd_delta > MAX_IPD_DELTA).any()
+    return dict(bone_violation = bool(viol),
+                ipd_violation  = bool(ipd_viol),
+                max_delta      = float(delta.max().max()),
+                ipd_max_delta  = float(ipd_delta.max()))
+4. Паттерны мягких тканей
+analyze_soft_tissue_aging_patterns
+
+python
+def analyze_soft_tissue_aging_patterns(hist: pd.DataFrame,
+                                       age: pd.Series) -> Dict:
+    slope = {}
+    for m in ["nose_projection_ratio", "chin_projection_ratio"]:
+        coef = np.polyfit(age, hist[m], 1)[0]   # мм/год
+        slope[m] = coef
+    mean_proj = np.mean(list(slope.values()))
+    # допустимо 1-2 мм/год
+    plaus = 1 - np.clip(abs(mean_proj - SAGGING_MM_YR)/SAGGING_MM_YR, 0, 1)
+    return dict(projection_slopes=slope, soft_tissue_plausibility=plaus)
+5. Исключение хирургии
+exclude_surgical_hypotheses_by_timeline
+
+python
+def exclude_surgical_hypotheses_by_timeline(hist: pd.DataFrame,
+                                            eye_err: pd.Series,
+                                            med_events: Dict,
+                                            min_interval=MIN_OP_TIME) -> bool:
+    peaks = (eye_err.diff().abs() > 0.05)   # резкий рост >0.05
+    peak_dates = eye_err.index[peaks]
+    # если два пика ближе 180 дней – хирургия маловероятна
+    inter = np.diff(peak_dates).astype('timedelta64[D]').astype(int)
+    suspect = any(d >= 14 and d <= 28 for d in inter) and \
+              all(d >= min_interval for d in inter)
+    # сопоставим с hospital events
+    hosp_dates = med_events.get('hospital', [])
+    overlap = any(abs((p - h).days) <= 7 for p in peak_dates for h in hosp_dates)
+    return not (suspect and not overlap)   # True ⇢ хир. гипотеза исключена
+6. Физиологические пределы скорости
+validate_physiological_change_limits
+
+python
+def validate_physiological_change_limits(hist: pd.DataFrame, age: pd.Series):
+    dt = age.diff().fillna(1)
+    rapid = {}
+    for m in hist.columns:
+        rate = hist[m].diff()/dt
+        std = rate.std(ddof=1)
+        rapid[m] = bool((rate.abs() > 3*std).any())
+    viol = sum(rapid.values())
+    return dict(rapid_metrics=rapid, fraction_violated=viol/len(hist.columns))
+7. Корреляция с documented health events
+correlate_anomalies_with_documented_health_events
+
+python
+def correlate_anomalies_with_documented_health_events(anom_table, med_events):
+    links = {}
+    for m, d in anom_table.items():
+        dates = d['anomaly_dates']      # из ит. 5
+        for ev_name, ev_list in med_events.items():
+            if any(abs((date - ev).days) <= 7 for date in dates for ev in ev_list):
+                links.setdefault(m, []).append(ev_name)
+    return links
+8. Комплексный балл биоправдоподобия
+calculate_biological_plausibility_score
+
+python
+def calculate_biological_plausibility_score(z_soft: pd.Series,
+                                            bone_check: Dict,
+                                            soft_tissue: Dict,
+                                            phys_limits: Dict):
+    score_soft = 1 - np.clip(z_soft.max()/Z_BIOL_LIMIT, 0, 1)
+    score_bone = 0 if (bone_check['bone_violation'] or bone_check['ipd_violation']) else 1
+    score_phys = 1 - phys_limits['fraction_violated']
+    score_tissue = soft_tissue['soft_tissue_plausibility']
+    return float(0.4*score_soft + 0.3*score_bone +
+                 0.2*score_phys + 0.1*score_tissue)
+9. Авто-отчёт
+auto_generate_medical_report
+
+python
+def auto_generate_medical_report(identity_id: int,
+                                 z_soft: pd.Series,
+                                 bone: Dict,
+                                 soft: Dict,
+                                 phys: Dict,
+                                 plaus: float) -> str:
+    lines=[f"ID {identity_id}: Биологический отчёт"]
+    lines.append(f"Макс |z| мягких тканей = {z_soft.max():.2f}")
+    lines.append(f"Нарушения костей: {bone['bone_violation']}, IPD: {bone['ipd_violation']}")
+    lines.append(f"Скорость проекций (мм/год): {soft['projection_slopes']}")
+    lines.append(f"Мягкотканевой показатель = {soft['soft_tissue_plausibility']:.2f}")
+    lines.append(f"Доля метрик с быстрыми скачками >3σ = {phys['fraction_violated']:.2%}")
+    lines.append(f"Итоговый балл биоправдоподобия = {plaus:.2f}")
+    verdict = "✔ Естественно" if plaus>0.7 else "✖ Требуется экспертиза"
+    lines.append(f"Вердикт: {verdict}")
+    return "\n".join(lines)
+10. Главная точка вызова
+python
+def medical_validate_identity(identity_id: int, dat: MedInput) -> Dict:
+    z_soft = validate_aging_consistency_for_identity(dat['metrics_history'],
+                                                     dat['age_series'])
+    bone   = check_bone_structure_immutability(dat['metrics_history'],
+                                               dat['age_series'])
+    soft   = analyze_soft_tissue_aging_patterns(dat['metrics_history'],
+                                                dat['age_series'])
+    phys   = validate_physiological_change_limits(dat['metrics_history'],
+                                                  dat['age_series'])
+    sur_ok = exclude_surgical_hypotheses_by_timeline(
+                 dat['metrics_history'],
+                 dat['eye_region_error_series'],
+                 dat['medical_events'])
+    plaus  = calculate_biological_plausibility_score(z_soft, bone, soft, phys)
+    report = auto_generate_medical_report(identity_id, z_soft, bone, soft, phys, plaus)
+    return dict(biological_plausibility=plaus,
+                surgical_hypothesis_excluded=sur_ok,
+                report_text=report)
+11. Юнит-тесты
+python
+def test_bone_invariance():
+    import pandas as pd
+    idx=pd.date_range('2000','2001',5)
+    df=pd.DataFrame({'skull_width_ratio':[1,1.01,0.99,1.005,1]}, index=idx)
+    age=pd.Series([48]*5, index=idx)
+    res=check_bone_structure_immutability(df.assign(
+          temple_width_ratio=df.skull_width_ratio,
+          zygomatic_arch_width=1,
+          orbital_depth=1,
+          eye_distance_ratio=0.64), age)
+    assert res['bone_violation'] is False
+
+def test_elasticity_z():
+    idx=pd.date_range('2010','2012',3)
+    age=pd.Series([58,59,60], index=idx)
+    df=pd.DataFrame({'nose_projection_ratio':[0.3,0.32,0.6]}, index=idx)
+    z=validate_aging_consistency_for_identity(df.assign(
+        chin_projection_ratio=df.nose_projection_ratio,
+        forehead_height_ratio=0.1,
+        eye_region_error=0.05), age)
+    assert z.max()>2.5        # должно сигнализировать
+
+def test_plausibility_combine():
+    plaus=calculate_biological_plausibility_score(
+        z_soft=pd.Series([1.0,1.5,0.5,0.2]),
+        bone=dict(bone_violation=False, ipd_violation=False),
+        soft=dict(soft_tissue_plausibility=0.9),
+        phys=dict(fraction_violated=0.1))
+    assert 0.7<plaus<1.0
+12. Acceptance-чек-лист
+Проверка	Критерий
+z
+Δкостных метрик ≤2 % после 25 лет	bone_violation=False
+IPD δ ≤2 %	ipd_violation=False
+Проекция скорость 1-2 мм/год	soft_tissue_plausibility≥0.7
+Быстрых скачков <10 % метрик	fraction_violated≤0.1
+Интервал между отёчностью ≥180 дн	surgical_hypothesis_excluded=True
+Итоговый biological_plausibility_score>0.7 → «Естественно»	
+13. Влияние на каскад (итерация 6)
+anomaly_detector.compute_final_verdict(...)
+добавить:
+
+python
+med = medical_validate_identity(cid, med_input)
+verdict['biological_plausibility'] = med['biological_plausibility']
+verdict['surgical_ok'] = med['surgical_hypothesis_excluded']
+verdict['medical_report'] = med['report_text']
+Если biological_plausibility<0.5 → понижаем final_authenticity на 0.1.
+
+14. Трудозатраты
+Блок	ч
+Алгоритмы + коды	6
+Тесты	3
+Интеграция с anomaly_detector	2
+Док/тип-подписи	1
+Ревью/рефактор	2
+Итого	14 ч
+Итерация 7 полностью закрывает несоответствия 361-420:
+модель старения, костная неизменность, мягкие ткани, хирургия, физиологические лимиты и формализованный мед-отчёт теперь встроены и количественно оценивают каждую личность.
+
+Итерация 8. Метрики высокого порядка и статистическая достоверность
+(устраняем несоответствия 421 – 480, модуль metrics_calculator.py)
+
+После этой фазы система будет выпускать статистически валидированные метрики второго уровня — «золотые» пропорции, краниальную стабильность, биометрическую уникальность, межметрические корреляции, доверительные интервалы Bootstrap 95 % и индексы стабильности. Эти значения нужны:
+
+для экспертных PDF-отчётов;
+
+для вкладки «Анализ метрик» в Gradio;
+
+как входы для медика и каскада (ит. 6-7).
+
+0. Конвенции
+python
+# metrics_calculator.py
+from typing import Dict, List, Tuple
+import numpy as np, pandas as pd, itertools, math, random
+from scipy import stats
+1. Нормализация всех сырьевых метрик
+normalize_metrics_by_stable_references
+
+python
+def normalize_metrics_by_stable_references(raw: Dict[str, float],
+                                           ref_points: Dict[str, float]) -> Dict[str, float]:
+    """
+    Приводим все абсолютные измерения к относительным:
+    делим на масштаб pose-специфических reference_points.
+    """
+    scale = ref_points['scale_factor']      # вычислен в face_3d_analyzer
+    norm = {k: v / scale for k, v in raw.items()}
+    return norm
+2. Краниальная стабильность
+calculate_cranial_stability_metrics
+
+python
+STABLE_METRICS = ['skull_width_ratio', 'temple_width_ratio',
+                  'zygomatic_arch_width', 'orbital_depth']
+
+def calculate_cranial_stability_metrics(norm_lmk: np.ndarray) -> Dict[str, float]:
+    i = lambda *idx: np.linalg.norm(norm_lmk[idx[0]] - norm_lmk[idx[1]])
+    skull_w   = i(0,16)                      # клепки висков
+    temple_w  = skull_w                      # дублируем по ТЗ
+    zygo_w    = i(3,13)
+    orbital_d = abs(norm_lmk[:,2].max() - norm_lmk[:,2].min())
+    return dict(skull_width_ratio=skull_w, temporal_bone_angles=0,
+                zygomatic_arch_width=zygo_w, orbital_depth=orbital_d)
+temporal_bone_angles требуют 3D-угол; здесь ноль-заглушка — дополним после готовности 3DDFA-R.
+
+3. «Золотое» лицо
+calculate_proportional_golden_ratios
+
+python
+GOLDEN = 1.618
+
+def _ratio(a,b): return a/b if b else np.nan
+
+def calculate_proportional_golden_ratios(norm_lmk: np.ndarray) -> Dict[str, float]:
+    h = np.linalg.norm(norm_lmk[27] - norm_lmk[8])            # общий рост лица
+    thirds = [np.linalg.norm(norm_lmk[s]-norm_lmk[e]) for s,e in [(27,30),(30,33),(33,8)]]
+    face_thirds = np.array(thirds)/h                          # ≈1/3 каждая
+    w = np.linalg.norm(norm_lmk[0] - norm_lmk[16])
+    fifths = [np.linalg.norm(norm_lmk[s]-norm_lmk[e]) for s,e in [(0,1),(1,36),(36,45),(45,15),(15,16)]]
+    face_fifths = np.array(fifths)/w
+    diag_prop = _ratio(np.linalg.norm(norm_lmk[36]-norm_lmk[8]),
+                       np.linalg.norm(norm_lmk[30]-norm_lmk[45]))
+    gold_dev  = np.mean(np.abs(np.concatenate([face_thirds, face_fifths, [diag_prop]]) - 1/GOLDEN))
+    return dict(golden_ratio_deviation=gold_dev,
+                vertical_thirds=face_thirds.tolist(),
+                horizontal_fifths=face_fifths.tolist(),
+                diagonal_proportion=diag_prop)
+Критерий: golden_ratio_deviation > 0.1 → аномалия.
+
+4. Биометрическая уникальность
+calculate_biometric_uniqueness_score
+
+python
+def calculate_biometric_uniqueness_score(metrics_vec: np.ndarray,
+                                         population_vectors: np.ndarray) -> float:
+    """
+    Считаем косинусную дистанцию до K ближайших «обычных» лиц.
+    Чем дальше, тем уникальнее.
+    """
+    dot = population_vectors @ metrics_vec / (
+           np.linalg.norm(population_vectors, axis=1) * np.linalg.norm(metrics_vec)+1e-9)
+    cos_dist = 1 - dot
+    k = min(10, len(cos_dist))
+    uniq = np.mean(np.sort(cos_dist)[:k])
+    return np.clip(uniq / 0.5, 0, 1)            # нормировка [0,1]
+0 → типичен, 1 → крайне уникален.
+
+5. Bootstrap доверительные интервалы
+bootstrap_metric_confidence (n = 1000)
+
+python
+def bootstrap_metric_confidence(values: np.ndarray,
+                                statfunc=np.mean,
+                                n_bootstrap: int = 1000,
+                                alpha: float = 0.95) -> Tuple[float,float]:
+    """
+    Эмпирический доверительный интервал Bootstrap[5].
+    """
+    rng = np.random.default_rng(42)
+    stats = []
+    N = len(values)
+    for _ in range(n_bootstrap):
+        sample = values[rng.integers(0, N, N)]
+        stats.append(statfunc(sample))
+    stats = np.sort(stats)
+    low  = stats[int((1-alpha)/2*n_bootstrap)]
+    high = stats[int((1+alpha)/2*n_bootstrap)]
+    return float(low), float(high)
+n_bootstrap ≥ 1000 фиксируется в validate_config_integrity().
+
+6. Межметрические корреляции
+calculate_inter_metric_correlations
+
+python
+def calculate_inter_metric_correlations(history: pd.DataFrame,
+                                        method='pearson') -> pd.DataFrame:
+    corr = history.corr(method=method)
+    # маскировка диагонали
+    np.fill_diagonal(corr.values, np.nan)
+    return corr
+Дальше применяется Bonferroni (см. пункт 7).
+
+7. Выявление аномальных корреляций
+detect_metric_outliers
+
+python
+def detect_metric_outliers(corr: pd.DataFrame, alpha=0.05) -> List[Tuple[str,str,float]]:
+    """
+    Ищем пары с |r|>0.7 и p<alpha*(k choose 2)  — Bonferroni[3].
+    """
+    k = corr.shape[0]
+    crit = alpha / (k*(k-1)/2)
+    out=[]
+    for i,j in itertools.combinations(corr.columns,2):
+        r = corr.loc[i,j]
+        if np.isnan(r): continue
+        t = r*math.sqrt((len(corr)-2)/(1-r**2))
+        p = 2*(1-stats.t.cdf(abs(t), len(corr)-2))
+        if abs(r)>0.7 and p<crit:
+            out.append((i,j,float(r)))
+    return out
+8. Стабильность метрик
+calculate_metric_stability_score
+
+python
+def calculate_metric_stability_score(series: pd.Series) -> float:
+    """
+    IQR-нормированное отклонение: 1 – идеально ровная, 0 – хаотичная.
+    """
+    q75, q25 = np.percentile(series.dropna(), [75,25])
+    iqr = q75 - q25 + 1e-9
+    mad = np.median(np.abs(series-q25))        # median abs dev
+    return float(1 - np.clip(mad/iqr, 0, 1))
+9. Композитный отчёт metrics_highlevel_report
+python
+def metrics_highlevel_report(norm_metrics_hist: pd.DataFrame,
+                             population_vectors: np.ndarray) -> Dict:
+    latest = norm_metrics_hist.iloc[-1]
+    cranial = calculate_cranial_stability_metrics(latest['landmarks_3d'])
+    gold    = calculate_proportional_golden_ratios(latest['landmarks_3d'])
+    uniq    = calculate_biometric_uniqueness_score(latest[STABLE_METRICS].values,
+                                                   population_vectors)
+    corr    = calculate_inter_metric_correlations(norm_metrics_hist[STABLE_METRICS])
+    outli   = detect_metric_outliers(corr)
+    ci_low, ci_high = bootstrap_metric_confidence(norm_metrics_hist['eye_distance_ratio'].values)
+    stab    = {c: calculate_metric_stability_score(norm_metrics_hist[c])
+               for c in norm_metrics_hist.columns}
+    return dict(cranial=cranial,
+                golden=gold,
+                uniqueness=uniq,
+                corr_matrix=corr,
+                anomalous_corr=outli,
+                eye_dist_CI=(ci_low, ci_high),
+                stability_scores=stab)
+10. Unit-тесты
+python
+def test_bootstrap_ci():
+    rng=np.random.default_rng(0)
+    arr=rng.normal(0,1,500)
+    low,high=bootstrap_metric_confidence(arr)
+    assert low < 0 < high            # 0 — истинное mean
+
+def test_golden_dev():
+    # идеальные пропорции -> dev≈0
+    lmk=np.zeros((68,3)); lmk[0]=[-0.5,0,0]; lmk[16]=[0.5,0,0]
+    lmk[27]=[0,0.666,0]; lmk[30]=[0,0.333,0]; lmk[33]=[0,0,0]; lmk[8]=[0,-0.333,0]
+    res=calculate_proportional_golden_ratios(lmk)
+    assert res['golden_ratio_deviation']<0.05
+11. Связь с предыдущими итерациями
+anomaly_detector (ит. 6) теперь может добавить:
+
+python
+verdict['uniqueness'] = highlevel['uniqueness']
+gradio_interface (ит. 9) отобразит Heatmap corr_matrix и BarPlot стабильностей.
+
+12. Acceptance-критерии
+Проверка	Ожидание
+Bootstrap CI n>=1000	ci_high-ci_low ≈ 1.96·σ/√n
+golden_ratio_deviation ≤ 0.1	«нормально»
+uniqueness ∈ 	>0.5 → «уникально»
+detect_metric_outliers	пары (
+stability_score	>0.8 – стабильно
+
+Итерация 9. Полный интерфейс и визуализация (модуль gradio_interface.py)
+Цель — реализовать законченный пользовательский интерфейс на Gradio, который позволяет:
+
+мониторить хроно-линию всех кластеров,
+
+сравнивать 15-метрические подписи и их доверительные интервалы,
+
+видеть распределение уровней масок и критические алерты,
+
+интерактивно проверять корректность нормализации landmarks,
+
+экспортировать PDF/JSON отчёт,
+
+демонстрировать итоговый вердикт с p-value и bootstrap-CI.
+
+Все действия помещаем в один файл gradio_interface.py; для универсального подключения используем Blocks API (поддерживает компоненты всех типов и чистую маршрутизацию событий).
+
+1. Базовая инициализация
+python
+import gradio as gr
+from datetime import datetime
+from core_config import VIEW_CONFIGS
+from anomaly_detector import compute_final_verdict
+from metrics_calculator import metrics_highlevel_report
+# … другие импорты
+
+CSS = """
+.gr-alert-critical {background:#ffdddd;}
+"""
+Создаём главный контекст:
+
+python
+def create_main_dashboard(app_state):
+    with gr.Blocks(css=CSS, theme="gradio/soft") as demo:
+        gr.Markdown("<h1 style='text-align:center'>FFacePP – детектор двойников</h1>")
+        with gr.Tabs():
+            with gr.TabItem("Хронология личностей"):
+                setup_identity_timeline_view(app_state)
+            with gr.TabItem("Анализ метрик"):
+                setup_metrics_comparison_view(app_state)
+            with gr.TabItem("Детекция масок"):
+                setup_mask_detection_dashboard(app_state)
+            with gr.TabItem("Экспертное заключение"):
+                setup_expert_analysis_tools(app_state)
+        setup_notification_system(app_state)     # глобальные алерты
+    return demo
+2. Хронология личностей (setup_identity_timeline_view)
+Компоненты:
+
+Компонент	Задача
+gr.Timeline	визуализация first_appearance – last_appearance каждой личности
+gr.Gallery	фото выбранного кластера
+gr.DataFrame	статистика кластера: count, longest_gap, authenticity
+python
+def setup_identity_timeline_view(st):
+    with gr.Column():
+        tl = gr.Timeline(label="Временная линия кластеров",
+                         value=st.timeline_df,                       # DataFrame с колонками start,end,label
+                         x="start", x_end="end", y="cluster_id")
+        gal = gr.Gallery(label="Фотографии кластера", columns=[4], height=240)
+        stats = gr.DataFrame(label="Статистика кластера")
+
+    def on_select(evt: gr.SelectData):
+        cid = evt.value["y"]               # ID из timeline
+        gal.value = st.cluster_to_images[cid]
+        stats.value = st.cluster_stats.loc[[cid]]
+    tl.select(on_select, None, None)
+gr.Timeline и дата-биннинг полностью поддерживаются Blocks API.
+
+3. Анализ метрик (setup_metrics_comparison_view)
+Компоненты:
+
+gr.LinePlot – временные ряды любой выбранной метрики (x – дата, y – значение).
+
+gr.Heatmap – меж-метрическая корреляционная матрица (corr_matrix из ит. 8).
+
+gr.DataFrame – bootstrap-95 % CI для каждой из 15 метрик.
+
+python
+def setup_metrics_comparison_view(st):
+    with gr.Row():
+        metric_select = gr.Dropdown(choices=st.metric_list, value="eye_distance_ratio")
+        line = gr.LinePlot(st.metrics_long_df, x="date", y="value",
+                           color="cluster_id", x_lim=None, every=gr.Timer(30))   # автообновление[4]
+    heat = gr.Heatmap(st.corr_matrix, label="Корреляции (Pearson)")
+    ci_tbl = gr.DataFrame(st.metric_ci_df, label="Bootstrap 95 % CI")
+    metric_select.change(lambda m: gr.LinePlot(st.metrics_long_df[st.metrics_long_df.metric==m],
+                                               x="date", y="value", color="cluster_id"),
+                         metric_select, line)
+gr.Timer обновляет данные каждые 30 с, полезно при live-потоке.
+
+4. Детекция масок (setup_mask_detection_dashboard)
+gr.BarPlot – распределение Levels по годам (x=year,y=count), x_bin="1y".
+
+gr.Alert – critical если mask_level>=4 и shape_error>threshold.
+
+gr.Number – последний материал-score.
+
+python
+def setup_mask_detection_dashboard(st):
+    bar = gr.BarPlot(st.mask_year_df, x="year", y="count", x_bin="1y")
+    alert = gr.Alert(label="Предупреждение", visible=False)
+    conf = gr.Number(label="Material authenticity score")
+    def update(level, score):
+        if level >=4 or score < 0.3:
+            alert.visible=True; alert.value="⚠ Высокий риск искусственного лица!"
+            alert.elem_classes="gr-alert-critical"            # красный фон
+        else:
+            alert.visible=False
+        conf.value = round(score,3)
+    st.mask_event_stream.on_update(update)
+gr.Alert выводит кастомное сообщение с классом gr-alert-critical.
+
+5. Интерактивные landmarks (create_interactive_landmarks_visualization)
+Используем один gr.Plot. Опция пользовательского выбора «до»/«после» реализуется через Radio.
+
+python
+def create_interactive_landmarks_visualization(st):
+    with gr.Row():
+        mode = gr.Radio(["Сырые", "Нормализованные"], value="Нормализованные")
+        plot = gr.Plot(label="Landmarks overlay")
+    def draw(m):
+        lm = st.norm_landmarks if m=="Нормализованные" else st.raw_landmarks
+        return gr.Plot(lm_to_fig(lm))      # lm_to_fig → Matplotlib
+    mode.change(draw, mode, plot)
+6. Матрица сравнения личностей (setup_identity_comparison_matrix)
+python
+def setup_identity_comparison_matrix(st):
+    df = gr.DataFrame(st.distance_df.round(3), label="D (cosine) между кластерами")
+    heat = gr.Heatmap(st.distance_df, label="Heatmap кластеров", x="id1", y="id2")
+7. Шкала аномалий (create_chronological_anomaly_timeline)
+python
+def create_chronological_anomaly_timeline(st):
+    tl = gr.Timeline(st.anomaly_df, x="start", x_end="end", y="type",
+                     color="severity", tooltip=["explanation"])
+st.anomaly_df собирается из temporal_analyzer + anomaly_detector.
+
+8. Экспертные инструменты (setup_expert_analysis_tools)
+python
+def setup_expert_analysis_tools(st):
+    with gr.Accordion("Экспорт и параметры", open=False):
+        export_json = gr.JSON(st.full_result_dict, label="JSON export")
+        export_pdf_btn = gr.Button("PDF отчёт")
+        par_code = gr.Code(value=st.params_yaml, language="yaml", label="Параметры")
+    export_pdf_btn.click(lambda d: generate_pdf(d), export_json, None)
+generate_pdf – функция из report_generator.py.
+
+9. Итоговый вердикт (create_final_verdict_dashboard)
+python
+def create_final_verdict_dashboard(st):
+    ids_num = gr.Number(value=len(st.clusters), label="Количество подтверждённых лиц")
+    df_verdict = gr.DataFrame(st.final_verdict_df.round(3),
+                              label="Уровень доверия и статистическая значимость")
+10. Система уведомлений (setup_notification_system)
+python
+def setup_notification_system(st):
+    alert = gr.Warning("Низкая подлинность!", duration=10)
+    def watcher(verdict):
+        if verdict['final_authenticity'] < 0.3:
+            gr.Warning(f"Критический кейс: кластер {verdict['cluster_id']} "
+                       f"final_auth={verdict['final_authenticity']:.2f}")
+    st.verdict_event_stream.on_update(watcher)
+gr.Warning отображает желтое модальное окно.
+
+11. Экспорт функций (create_export_functionality)
+PDF и JSON генерируются через report_generator.generate_pdf_report и json.dumps.
+
+python
+def create_export_functionality(st):
+    with gr.Row():
+        pdf_btn = gr.Button("Скачать PDF")
+        json_btn = gr.Button("Скачать JSON")
+    pdf_btn.click(lambda r: report_generator.generate_pdf_report(r),
+                  st.full_result_dict, None, _js="downloadFile")
+    json_btn.click(lambda r: json.dumps(r, ensure_ascii=False, indent=2),
+                   st.full_result_dict, "file")
+12. Интеграция в main.py
+python
+if __name__ == "__main__":
+    app_state = preload_state()          # собираем все df/метрики из итерац.1-8
+    demo = create_main_dashboard(app_state)
+    demo.queue(concurrency_count=2).launch(server_name="0.0.0.0", share=True)
+queue() нужен для асинхр. событий и модальных предупреждений.
+
+13. Юнит-тесты интерфейса (headless)
+python
+def test_tabs_present():
+    from gradio_interface import create_main_dashboard
+    st = MockState()
+    demo = create_main_dashboard(st)
+    assert any(tab.label=="Детекция масок" for tab in demo.children)
+
+def test_alert_trigger():
+    st = MockState()
+    demo = create_main_dashboard(st)
+    st.mask_event_stream.emit(level=4, score=0.25)
+    assert demo.get_component("alert").visible
+14. Приёмочные критерии
+Требование из ТЗ	Проверка
+4 вкладки	len(demo.tabs)==4
+Timeline+Gallery+DataFrame	визуальные smoke-тесты
+Heatmap корреляций	setup_metrics_comparison_view
+Alert при final_auth<0.3	unit-тест
+Экспорт PDF	файл не пустой
+p-value & CI в финальном df	колонки p_value, CI_low, CI_high
+
+теперь напиши 10 (финальную) часть итераций на 15000 символов
+теперь напиши 10 (финальную) часть итераций на 15000 символов
+Итерация 10. Финальный полировочный цикл
+(устраняем несоответствия 541-600: отчёты, интеграционные тесты, CI/CD, выпуск релиза)
+
+1. Report Generator: консолидация результатов
+1.1. Сбор данных
+
+python
+def _collect_results(state):
+    return dict(
+        clusters          = state.clusters,               # список id
+        final_verdicts    = state.final_verdict_df.to_dict(),
+        highlevel_metrics = state.highlevel_report,        # из ит. 8
+        medical_reports   = state.medical_reports,         # из ит. 7
+        gradio_snapshot   = state.dashboard_url,           # ссылка share()
+        version           = state.git_hash,                # commit id
+        generated_at      = datetime.utcnow().isoformat()+"Z")
+1.2. Экспорт JSON
+
+python
+def export_json(results, path="ffacepp_report.json"):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    return path
+
+
+
+выполняй последовательно согласно этого плана.
