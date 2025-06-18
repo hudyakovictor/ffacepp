@@ -151,6 +151,9 @@ class DataProcessor:
             "cache_misses": 0
         }
         
+        self.landmark_miss_count = 0
+        self.total_images_processed = 0
+        
         logger.info(f"{Colors.BOLD}--- DataProcessor успешно инициализирован ---{Colors.RESET}")
 
     def _initialize_analyzers(self) -> None:
@@ -253,7 +256,7 @@ class DataProcessor:
             landmarks68 = analysis_3d_result.get("landmarks68")
 
             # Проверка, что landmarks68 не None перед вызовом analyze_embedding_async
-            if landmarks68.size == 0 or landmarks68 is None:
+            if landmarks68 is None or not hasattr(landmarks68, 'size') or landmarks68.size == 0:
                 logger.warning(f"[DataProcessor] Ландмарки не найдены для файла {filepath}. Пропускаем анализ эмбеддингов.")
                 embedding_result = {"error": "No landmarks for embedding analysis"}
             else:
@@ -351,7 +354,11 @@ class DataProcessor:
                 "confidence_3d_landmarks": np.mean(confidence).item() # Средняя уверенность по ландмаркам
             }
         
-        return await loop.run_in_executor(None, analyze)
+        result = await loop.run_in_executor(None, analyze)
+        self.total_images_processed += 1
+        if result.get('error', '').lower().find('лицо не обнаружено') != -1:
+            self.landmark_miss_count += 1
+        return result
 
     async def analyze_embedding_async(self, image: np.ndarray, landmarks: np.ndarray, insight_app: np.ndarray) -> Dict[str, Any]:
         """
@@ -365,7 +372,7 @@ class DataProcessor:
             # ИСПРАВЛЕНО: Передача полного изображения, 68 ландмарок и insight_app
             embedding, confidence = self.embedding_analyzer.extract_512d_face_embedding(image, landmarks, insight_app)
             
-            if embedding is None or embedding.size == 0:
+            if embedding is None or not hasattr(embedding, 'size') or embedding.size == 0:
                 logger.warning("InsightFace не обнаружил лица в изображении")
                 return {"status": "failed", "error": ERROR_CODES["E001"], "embedding": []}
             
@@ -422,26 +429,26 @@ class DataProcessor:
                 if confidence:
                     component_scores["geometry"] = float(np.mean(confidence))
                 else:
-                    component_scores["geometry"] = 0.5
+                    component_scores["geometry"] = None
             else:
-                component_scores["geometry"] = 0.0
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Геометрический анализ для '{filepath}' завершился с ошибкой или отсутствует. Балл геометрии установлен в 0.{Colors.RESET}")
+                component_scores["geometry"] = None
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Геометрический анализ для '{filepath}' завершился с ошибкой или отсутствует. Балл геометрии пропущен.{Colors.RESET}")
             
             # Эмбеддинги
             if "embedding" in analysis_results and "error" not in analysis_results["embedding"]:
-                embedding_confidence = analysis_results["embedding"].get("confidence", 0.0)
-                component_scores["embedding"] = float(embedding_confidence)
+                embedding_confidence = analysis_results["embedding"].get("confidence", None)
+                component_scores["embedding"] = float(embedding_confidence) if embedding_confidence is not None else None
             else:
-                component_scores["embedding"] = 0.0
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Анализ эмбеддингов для '{filepath}' завершился с ошибкой или отсутствует. Балл эмбеддингов установлен в 0.{Colors.RESET}")
+                component_scores["embedding"] = None
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Анализ эмбеддингов для '{filepath}' завершился с ошибкой или отсутствует. Балл эмбеддингов пропущен.{Colors.RESET}")
             
             # Текстура
             if "texture" in analysis_results and "error" not in analysis_results["texture"]:
-                texture_authenticity = analysis_results["texture"].get("authenticity_score", 0.0)
-                component_scores["texture"] = float(texture_authenticity)
+                texture_authenticity = analysis_results["texture"].get("authenticity_score", None)
+                component_scores["texture"] = float(texture_authenticity) if texture_authenticity is not None else None
             else:
-                component_scores["texture"] = 0.0
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Анализ текстуры для '{filepath}' завершился с ошибкой или отсутствует. Балл текстуры установлен в 0.{Colors.RESET}")
+                component_scores["texture"] = None
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Анализ текстуры для '{filepath}' завершился с ошибкой или отсутствует. Балл текстуры пропущен.{Colors.RESET}")
             
             # Временные компоненты (заглушки для одиночного файла)
             component_scores["temporal_consistency"] = 0.7
@@ -451,15 +458,11 @@ class DataProcessor:
             component_scores["liveness_score"] = 0.8
             
             # Расчет итогового балла с AUTHENTICITY_WEIGHTS
-            overall_authenticity = sum(
-                AUTHENTICITY_WEIGHTS.get(component, 0) * score
-                for component, score in component_scores.items()
-            )
-            
-            # Нормализация по сумме весов
-            total_weight = sum(AUTHENTICITY_WEIGHTS.values())
-            if total_weight > 0:
-                overall_authenticity /= total_weight
+            valid_scores = [score for score in component_scores.values() if score is not None]
+            if valid_scores:
+                overall_authenticity = float(np.nanmean(valid_scores))
+            else:
+                overall_authenticity = 0.0
             
             # Сбор аномалий
             anomalies = {}
@@ -642,6 +645,11 @@ class DataProcessor:
             # В данном случае, мы используем существующий файл, поэтому удалять не нужно.
             # logger.info(f"Удалено тестовое изображение: {test_image_path}")
             pass
+
+        if self.total_images_processed > 0:
+            miss_ratio = self.landmark_miss_count / self.total_images_processed
+            if miss_ratio > 0.05:
+                logger.warning(f"Доля кадров без найденных ландмарок: {miss_ratio:.2%} (>{5}%) — проверьте качество входных данных!")
 
 # ==================== АГРЕГАТОР РЕЗУЛЬТАТОВ ====================
 

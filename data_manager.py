@@ -243,15 +243,10 @@ class DataManager:
         """
         try:
             img = self._safe_load_image(img_input)
-            if img is None:
+            if img is None or not hasattr(img, 'size') or img.size == 0:
                 logger.warning(f"Изображение для валидации качества пусто или None после безопасной загрузки.")
                 self.processing_stats["quality_failed"] += 1
                 return {"quality_score": 0.0, "issues": ["empty_or_failed_load"], "error_code": ERROR_CODES["E002"]}
-
-            if img.size == 0:
-                logger.warning(f"Изображение для валидации качества пусто.")
-                self.processing_stats["quality_failed"] += 1
-                return {"quality_score": 0.0, "issues": ["empty_image"], "error_code": ERROR_CODES["E002"]}
 
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
             

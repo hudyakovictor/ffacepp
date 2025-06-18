@@ -16,6 +16,7 @@ from pathlib import Path
 import json
 from datetime import datetime, timedelta
 import cv2
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(
@@ -71,7 +72,27 @@ class VisualizationEngine:
         # Кэш графиков
         self.plot_cache = {}
         
+        self.plot_queue = asyncio.Queue()
+        self.plot_worker_task = None
+        
         logger.info("VisualizationEngine инициализирован")
+
+    async def plot_worker(self):
+        while True:
+            func, args, kwargs = await self.plot_queue.get()
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Ошибка построения графика в очереди: {e}")
+            self.plot_queue.task_done()
+
+    def start_plot_worker(self):
+        if self.plot_worker_task is None:
+            loop = asyncio.get_event_loop()
+            self.plot_worker_task = loop.create_task(self.plot_worker())
+
+    def enqueue_plot(self, func, *args, **kwargs):
+        self.plot_queue.put_nowait((func, args, kwargs))
 
     def create_3d_scatter_plot(self, embeddings: np.ndarray, labels: List[str], 
                              metadata: Dict[str, Any]) -> go.Figure:
@@ -233,8 +254,9 @@ class VisualizationEngine:
             # График 1: Аутентичность во времени
             dates = temporal_data.get('dates', [])
             authenticity_scores = temporal_data.get('authenticity_scores', [])
-            
             if dates and authenticity_scores:
+                dates = pd.to_datetime(dates, errors='coerce')
+                authenticity_scores = [float(x) for x in authenticity_scores]
                 fig.add_trace(
                     go.Scatter(
                         x=dates,
@@ -277,6 +299,8 @@ class VisualizationEngine:
             anomaly_dates = temporal_data.get('anomaly_dates', [])
             anomaly_counts = temporal_data.get('anomaly_counts', [])
             if anomaly_dates and anomaly_counts:
+                anomaly_dates = pd.to_datetime(anomaly_dates, errors='coerce')
+                anomaly_counts = [int(x) for x in anomaly_counts]
                 fig.add_trace(
                     go.Bar(
                         x=anomaly_dates,
@@ -573,7 +597,7 @@ class VisualizationEngine:
         try:
             logger.info("Создание тепловой карты аутентичности")
             
-            if image is None or image.size == 0:
+            if image is None or not hasattr(image, 'size') or image.size == 0:
                 logger.warning("Пустое изображение для тепловой карты")
                 return np.zeros((400, 400, 3), dtype=np.uint8), []
             

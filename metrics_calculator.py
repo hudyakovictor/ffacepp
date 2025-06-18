@@ -189,8 +189,8 @@ class MetricsCalculator:
         ИСПРАВЛЕНО: Расчет 15 метрик идентичности
         Согласно правкам: calculateidentitysignaturemetrics с 15 метриками
         """
-        if landmarks_3d.size == 0 or landmarks_3d.shape[0] < 68:
-            logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Недостаточно ландмарок (точек лица) для точного расчета метрик. Возможно, лицо не обнаружено или качество низкое.{Colors.RESET}")
+        if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0 or landmarks_3d.shape[0] < 68:
+            logger.warning("Ландмарки не найдены или их недостаточно для расчёта метрик.")
             return {}
         
         try:

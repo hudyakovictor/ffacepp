@@ -99,7 +99,8 @@ class Interactive3DViewer(BaseUIComponent):
     def create_3d_model_from_landmarks(self, landmarks_3d: np.ndarray) -> str:
         """Создание 3D модели из ландмарок"""
         try:
-            if landmarks_3d.size == 0:
+            if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0:
+                logger.warning("Ландмарки не найдены или пусты, пропуск.")
                 return ""
             
             obj_content = self.landmarks_to_obj(landmarks_3d)

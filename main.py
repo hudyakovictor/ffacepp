@@ -17,6 +17,7 @@ import signal
 import traceback
 import json
 import numpy as np
+import warnings
 
 # --- ЦВЕТА КОНСОЛИ ---
 class Colors:
@@ -78,7 +79,7 @@ try:
     from medical_validator import MedicalValidator
     from data_manager import DataManager
     from metrics_calculator import MetricsCalculator
-    from data_processing import DataProcessor, ResultsAggregator
+    from data_processing import DataProcessor, ResultsAggregator, AnalysisResult
     from gradio_interface import GradioInterface, create_modular_interface
     from visualization_engine import VisualizationEngine
     from report_generator import ReportGenerator
@@ -437,7 +438,32 @@ class FaceAuthenticitySystem:
             # Агрегация результатов через results_aggregator
             results_aggregator = self.components['results_aggregator']
             logger.info(f"Агрегация результатов {len(results_list)} успешно обработанных файлов...")
-            results_aggregator.add_results(results_list)
+            # --- ИСПРАВЛЕНИЕ: Преобразуем словари в AnalysisResult ---
+            analysis_results_objs = []
+            for r in results_list:
+                if isinstance(r, dict):
+                    # Если есть ошибка, заполняем минимально
+                    if 'error' in r:
+                        analysis_results_objs.append(AnalysisResult(
+                            filepath=r.get('path', r.get('filepath', '')),
+                            timestamp=str(datetime.now()),
+                            authenticity_score=0.0,
+                            anomalies={"processing_error": r.get('error', '')},
+                            metrics=r.get('metrics', {}),
+                            metadata={k: v for k, v in r.items() if k not in ['path', 'filepath', 'metrics', 'error']}
+                        ))
+                    else:
+                        analysis_results_objs.append(AnalysisResult(
+                            filepath=r.get('path', r.get('filepath', '')),
+                            timestamp=str(datetime.now()),
+                            authenticity_score=r.get('authenticity_score', 0.0),
+                            anomalies={},
+                            metrics=r.get('metrics', {}),
+                            metadata={k: v for k, v in r.items() if k not in ['path', 'filepath', 'metrics', 'authenticity_score']}
+                        ))
+                else:
+                    analysis_results_objs.append(r)
+            results_aggregator.add_results(analysis_results_objs)
             
             # Создание сводки
             results["summary"] = results_aggregator.get_statistics()
@@ -523,57 +549,115 @@ class FaceAuthenticitySystem:
 
             # 1. Валидация качества изображения
             quality_results = data_manager.validate_image_quality_for_analysis(img)
-            if quality_results['quality_score'] < CRITICAL_THRESHOLDS["min_quality_score"]:
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкое качество изображения {image_path} (score: {quality_results['quality_score']:.2f}).{Colors.RESET}")
-                return {"path": image_path, "quality_issues": quality_results["issues"], "quality_score": quality_results["quality_score"], "error": "Низкое качество изображения"}
+            if quality_results is None or not isinstance(quality_results, dict):
+                return {"path": image_path, "error": "Ошибка валидации качества изображения"}
+            if quality_results.get('quality_score', 0) < CRITICAL_THRESHOLDS["min_quality_score"]:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкое качество изображения {image_path} (score: {quality_results.get('quality_score', 0):.2f}).{Colors.RESET}")
+                return {"path": image_path, "quality_issues": quality_results.get("issues", []), "quality_score": quality_results.get("quality_score", 0), "error": "Низкое качество изображения"}
 
             # 2. Извлечение 68 ландмарок
-            landmarks_3d, confidence_array, param = face_analyzer.extract_68_landmarks_with_confidence(img, models={'tddfa': face_analyzer.tddfa, 'face_boxes': face_analyzer.faceboxes}) # Pass models from analyzer
+            landmarks_3d, confidence_array, param = face_analyzer.extract_68_landmarks_with_confidence(img, models={'tddfa': face_analyzer.tddfa, 'face_boxes': face_analyzer.faceboxes})
             if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Лицо не обнаружено на изображении {image_path}. Пропускаем.{Colors.RESET}")
                 return {"path": image_path, "error": "Лицо не обнаружено"}
+            if confidence_array is None or not hasattr(confidence_array, 'size') or confidence_array.size == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Confidence array пустой для {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Confidence array пустой"}
+            if param is None or not hasattr(param, 'size') or param.size == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Параметры модели пустые для {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Параметры модели пустые"}
 
             # 3. Определение позы
             pose_analysis = face_analyzer.determine_precise_face_pose(landmarks_3d, param, confidence_array)
-            pose_category = pose_analysis["pose_category"]
+            if pose_analysis is None or not isinstance(pose_analysis, dict):
+                return {"path": image_path, "error": "Ошибка определения позы"}
+            pose_category = pose_analysis.get("pose_category", "Unknown")
+            if pose_category == "Unknown" or pose_category == "Error":
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось определить позу для {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Не удалось определить позу"}
 
             # 4. Нормализация ландмарок
             vis = landmarks_3d[:,2] > MIN_VISIBILITY_Z
             norm_landmarks = face_analyzer.normalize_landmarks_by_pose_category(landmarks_3d, pose_category, vis)
+            if norm_landmarks is None or not hasattr(norm_landmarks, 'size') or norm_landmarks.size == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось нормализовать ландмарки для {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Не удалось нормализовать ландмарки"}
 
             # 5. Расчет метрик идентичности
             metrics = face_analyzer.calculate_identity_signature_metrics(norm_landmarks, pose_category)
+            if metrics is None or not isinstance(metrics, dict) or len(metrics) == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось рассчитать метрики для {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Не удалось рассчитать метрики"}
 
-            # 6. Извлечение эмбеддинга лица (512D) и анализ эмбеддингов
+            # 6. Проверка shape error (если используется)
+            if hasattr(face_analyzer, 'calculate_comprehensive_shape_error'):
+                try:
+                    shape_error = face_analyzer.calculate_comprehensive_shape_error(norm_landmarks)
+                    if shape_error is None or not isinstance(shape_error, dict):
+                        return {"path": image_path, "error": "Ошибка shape error"}
+                except Exception as e:
+                    return {"path": image_path, "error": f"Ошибка shape error: {e}"}
+
+            # 7. Проверка асимметрии (если используется)
+            if hasattr(face_analyzer, 'analyze_facial_asymmetry'):
+                try:
+                    logger.info(f"[DEBUG] Перед анализом асимметрии: type(landmarks_3d)={type(landmarks_3d)}, shape={getattr(landmarks_3d, 'shape', None)}, size={getattr(landmarks_3d, 'size', None)}")
+                    logger.info(f"[DEBUG] Перед анализом асимметрии: type(confidence_array)={type(confidence_array)}, shape={getattr(confidence_array, 'shape', None)}, size={getattr(confidence_array, 'size', None)}")
+                    left_indices  = [0, 1, 2, 3, 4, 5, 6, 7, 17, 18, 19, 20, 36, 37, 38, 39, 40, 41, 48, 49, 50, 51, 52, 53, 54]
+                    right_indices = [16,15,14,13,12,11,10,9,26,25,24,23,45,44,43,42,47,46,54,53,52,51,50,49,48]
+                    asymmetry = face_analyzer.analyze_facial_asymmetry(landmarks_3d, confidence_array)
+                    if not isinstance(asymmetry, dict) or not asymmetry:
+                        logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось проанализировать асимметрию для {image_path}. Пропускаем.{Colors.RESET}")
+                        return {"path": image_path, "error": "Ошибка анализа асимметрии"}
+                except Exception as e:
+                    logger.error(f"[DEBUG] Ошибка при анализе асимметрии: {e}")
+                    return {"path": image_path, "error": f"Ошибка анализа асимметрии: {e}"}
+
+            # 8. Извлечение эмбеддинга лица (512D) и анализ эмбеддингов
             embedding_analyzer = self.components['embedding_analyzer']
             emb, emb_conf = embedding_analyzer.extract_512d_face_embedding(img, embedding_analyzer.face_app)
-            if emb is not None and emb_conf >= 0.9:
-                # Анализ эмбеддингов: кластеризация, аномалии, confidence, fusion
-                # (В реальном пайплайне сюда можно добавить загрузку всех эмбеддингов для identity)
-                emb_result = {
-                    'embedding': emb.tolist(),
-                    'extraction_confidence': float(emb_conf)
-                }
-                # Пример: кластеризация (можно расширить)
-                # cluster_res = embedding_analyzer.perform_identity_clustering([...])
-                # fusion: ensemble_embedding_analysis
-                fusion = embedding_analyzer.ensemble_embedding_analysis(
-                    np.expand_dims(emb, axis=0), strategies=("mean-cosine", "median")
-                )
-                emb_result['ensemble_fusion'] = fusion
-            else:
-                emb_result = {'embedding': None, 'extraction_confidence': float(emb_conf)}
+            if emb is None or emb_conf is None or not hasattr(emb, 'size') or emb.size == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось извлечь эмбеддинг для {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Не удалось извлечь эмбеддинг"}
+            if not isinstance(emb_conf, (float, int, np.floating)):
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Некорректный тип emb_conf для {image_path}: {emb_conf} ({type(emb_conf)}). Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Некорректный тип emb_conf"}
+            if emb_conf < 0.3:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкая уверенность эмбеддинга для {image_path} (confidence={emb_conf:.3f} < 0.3). Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": f"Низкая уверенность эмбеддинга: {emb_conf:.3f}"}
+            emb_result = {
+                'embedding': emb.tolist(),
+                'extraction_confidence': float(emb_conf)
+            }
+            fusion = embedding_analyzer.ensemble_embedding_analysis(
+                np.expand_dims(emb, axis=0), strategies=("mean-cosine", "median")
+            )
+            emb_result['ensemble_fusion'] = fusion
 
-            # 7. Анализ текстуры кожи (LBP, Gabor, FFT, entropy, Level)
+            # 9. Анализ текстуры кожи (LBP, Gabor, FFT, entropy, Level)
             texture_analyzer = self.components['texture_analyzer']
-            # Для анализа зон нужны landmarks (нормализованные или оригинальные)
             texture_zones = texture_analyzer.analyze_skin_texture_by_zones(img, landmarks_3d)
-            # Итоговый score материала
+            if texture_zones is None or not isinstance(texture_zones, dict) or len(texture_zones) == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось проанализировать текстуру для {image_path}. Пропускаем.{Colors.RESET}")
+                return {"path": image_path, "error": "Не удалось проанализировать текстуру"}
             material_score = texture_analyzer.calculate_material_authenticity_score(texture_zones)
-            # Классификация уровня маски
             mask_level = texture_analyzer.classify_mask_technology_level(texture_zones, photo_date=item_date)
 
-            # Возвращаем расширенный результат
+            # --- ДОБАВЛЯЮ РАСЧЁТ authenticity_score ---
+            anomaly_detector = self.components['anomaly_detector']
+            # Для простого случая: используем средние значения, если нет отдельных score
+            geometry_score = metrics.get('geometry_score', 1.0) if 'geometry_score' in metrics else 1.0
+            embedding_score = float(emb_conf)
+            texture_score = float(material_score)
+            temporal_score = 1.0  # если нет временного анализа, ставим 1.0
+            authenticity_score = anomaly_detector.calculate_identity_authenticity_score(
+                geometry=geometry_score,
+                embedding=embedding_score,
+                texture=texture_score,
+                temporal_consistency=temporal_score
+            )
+
+            # Возвращаем расширенный результат с authenticity_score
             return dict(
                 path=image_path,
                 pose=pose_category,
@@ -586,7 +670,8 @@ class FaceAuthenticitySystem:
                 embedding_analysis=emb_result,
                 texture_zones=texture_zones,
                 material_score=material_score,
-                mask_level=mask_level
+                mask_level=mask_level,
+                authenticity_score=authenticity_score
             )
         except Exception as e:
             logger.error(f"{Colors.RED}ОШИБКА анализа изображения {image_path}: {e}{Colors.RESET}")
@@ -832,3 +917,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+class DataMissingWarning(UserWarning):
+    pass
+
+warnings.filterwarnings('once')

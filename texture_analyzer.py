@@ -13,6 +13,7 @@ from pathlib import Path
 import json
 import math
 from datetime import datetime
+import os
 
 # Научные библиотеки для анализа текстуры
 from scipy import stats
@@ -94,7 +95,7 @@ FACE_ZONES = {
 
 def calculate_mean_std(data: np.ndarray) -> Tuple[float, float]:
     """Расчет среднего и стандартного отклонения"""
-    if data.size == 0:
+    if data is None or not hasattr(data, 'size') or data.size == 0:
         return 0.0, 0.0
     return float(np.mean(data)), float(np.std(data))
 
@@ -102,7 +103,7 @@ def create_zone_mask(image_shape: Tuple[int, int], zone_coords: np.ndarray) -> n
     """Создание маски для зоны лица"""
     try:
         mask = np.zeros(image_shape, dtype=np.uint8)
-        if zone_coords.size > 0:
+        if zone_coords is None or not hasattr(zone_coords, 'size') or zone_coords.size > 0:
             cv2.fillPoly(mask, [zone_coords.astype(np.int32)], 255)
         return mask
     except Exception as e:
@@ -231,7 +232,7 @@ class TextureAnalyzer:
         ИСПРАВЛЕНО: Определение зон кожи по ландмаркам
         Согласно правкам: правильное определение 5 зон лица
         """
-        if landmarks.size == 0 or landmarks.shape[0] < 68:
+        if landmarks is None or not hasattr(landmarks, 'size') or landmarks.size == 0 or landmarks.shape[0] < 68:
             logger.warning("Недостаточно ландмарок для определения зон кожи")
             return {}
         
@@ -316,7 +317,7 @@ class TextureAnalyzer:
             skin_zones = self.define_skin_zones(landmarks, image.shape[:2])
             
             for zone_name, zone_coords in skin_zones.items():
-                if zone_coords.size == 0:
+                if zone_coords is None or not hasattr(zone_coords, 'size') or zone_coords.size == 0:
                     continue
                 
                 logger.info(f"Анализ зоны: {zone_name}")
@@ -332,7 +333,7 @@ class TextureAnalyzer:
                 
                 # Получение координат маски
                 y_coords, x_coords = np.where(mask > 0)
-                if y_coords.size == 0 or x_coords.size == 0:
+                if y_coords is None or not hasattr(y_coords, 'size') or y_coords.size == 0 or x_coords is None or not hasattr(x_coords, 'size') or x_coords.size == 0:
                     continue
                 
                 # Bounding box зоны
@@ -343,7 +344,7 @@ class TextureAnalyzer:
                 cropped_zone_region = zone_region_colored[min_y:max_y+1, min_x:max_x+1]
                 cropped_mask = mask[min_y:max_y+1, min_x:max_x+1]
                 
-                if cropped_zone_region.size == 0:
+                if cropped_zone_region is None or not hasattr(cropped_zone_region, 'size') or cropped_zone_region.size == 0:
                     continue
                 
                 # ИСПРАВЛЕНО: Преобразование к типу np.uint8 перед cv2.cvtColor
@@ -362,7 +363,7 @@ class TextureAnalyzer:
                 zone_region_gray = cv2.cvtColor(cropped_zone_region, cv2.COLOR_BGR2GRAY) if cropped_zone_region.ndim == 3 else cropped_zone_region
                 valid_pixels_gray = zone_region_gray[valid_pixels_mask]
                 
-                if valid_pixels_colored.size == 0 or valid_pixels_gray.size == 0:
+                if valid_pixels_colored is None or not hasattr(valid_pixels_colored, 'size') or valid_pixels_colored.size == 0 or valid_pixels_gray is None or not hasattr(valid_pixels_gray, 'size') or valid_pixels_gray.size == 0:
                     logger.warning(f"Зона {zone_name} не содержит валидных пикселей")
                     continue
                 
@@ -465,7 +466,7 @@ class TextureAnalyzer:
         ИСПРАВЛЕНО: Расчет Shannon entropy
         Согласно правкам: правильная обработка гистограммы
         """
-        if pixel_values.size == 0:
+        if pixel_values is None or not hasattr(pixel_values, 'size') or pixel_values.size == 0:
             return 0.0
         
         try:
@@ -540,7 +541,7 @@ class TextureAnalyzer:
         """
         ИСПРАВЛЕНО: Расчет Fourier spectrum + FFT пики 0.15, 0.3, 0.6
         """
-        if image_region.size == 0 or image_region.ndim == 0:
+        if image_region is None or not hasattr(image_region, 'size') or image_region.size == 0 or image_region.ndim == 0:
             logger.warning("calculate_fourier_spectrum: Пустой или невалидный регион изображения")
             return {
                 "spectral_centroid": 0.0,
@@ -715,9 +716,9 @@ class TextureAnalyzer:
         ИСПРАВЛЕНО: Расчет оценки аутентичности материала
         Согласно правкам: учет всех зон с правильными весами
         """
-        if not texture_metrics:
+        if texture_metrics is None or not hasattr(texture_metrics, 'size') or texture_metrics.size == 0:
             logger.warning("Пустые метрики текстуры для расчета аутентичности")
-            return 0.0
+            return np.nan
         
         try:
             logger.info("Расчет оценки аутентичности материала")
@@ -740,7 +741,7 @@ class TextureAnalyzer:
                 scores.append(zone_score * weight)
             
             if not scores:
-                return 0.0
+                return np.nan
             
             overall_score = np.sum(scores)
             
@@ -752,7 +753,7 @@ class TextureAnalyzer:
             
         except Exception as e:
             logger.error(f"Ошибка расчета аутентичности материала: {e}")
-            return 0.0
+            return np.nan
 
     def calculate_zone_authenticity(self, zone_metrics: Dict[str, Any], zone_name: str = "default") -> float:
         """
@@ -832,7 +833,7 @@ class TextureAnalyzer:
         try:
             logger.info("Классификация уровня технологии маски")
             
-            if not texture_data:
+            if texture_data is None or not hasattr(texture_data, 'size') or texture_data.size == 0:
                 return {"level": "Unknown", "confidence": 0.0, "reason": "Нет данных текстуры"}
             
             # Определение года фото
@@ -950,7 +951,7 @@ class TextureAnalyzer:
         ИСПРАВЛЕНО: Адаптивный анализ текстуры
         Согласно правкам: учет условий освещения и адаптация параметров
         """
-        if image is None or landmarks.size == 0:
+        if image is None or not hasattr(landmarks, 'size') or landmarks.size == 0:
             logger.warning("Невалидные данные для адаптивного анализа")
             return {}
         
@@ -1132,6 +1133,17 @@ class TextureAnalyzer:
             logger.error(f"Ошибка самотестирования: {e}")
         
         logger.info("=== Самотестирование завершено ===")
+
+    def save_texture_baselines(self, new_baselines: Dict[str, Dict[str, float]], cache_file: str = "texture_baselines.json") -> None:
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                old_baselines = json.load(f)
+            if old_baselines == new_baselines:
+                logger.info("Базовые линии текстуры не изменились, файл не сохраняется.")
+                return
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(new_baselines, f, indent=2, ensure_ascii=False)
+        logger.info(f"Базовые линии текстуры сохранены в {cache_file}")
 
 # ==================== ТОЧКА ВХОДА ====================
 

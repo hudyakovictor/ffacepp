@@ -20,6 +20,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import os
 import sys
+import collections
 
 # Настройка логирования
 logging.basicConfig(
@@ -44,7 +45,7 @@ try:
         REQUIRED_3DDFA_FILES, VIEW_CONFIGS, CAMERA_BOX_FRONT_SIZE_FACTOR,
         CRITICAL_THRESHOLDS, get_identity_signature_metrics,
         get_view_configs, AGING_MODEL, MIN_VISIBILITY_Z, MODELS_DIR,
-        STANDARD_IOD, STANDARD_NOSE_EYE, STANDARD_FACE_HEIGHT, STANDARD_PROFILE_HEIGHT
+        STANDARD_IOD, STANDARD_NOSE_EYE, STANDARD_FACE_HEIGHT, STANDARD_PROFILE_HEIGHT, IOD_RATIO_MIN, IOD_RATIO_MAX
     )
     
     HAS_3DDFA = True
@@ -206,6 +207,8 @@ class Face3DAnalyzer:
     ИСПРАВЛЕНО: Все критические ошибки согласно правкам
     """
     
+    IOD_HISTORY_SIZE = 100
+    
     def __init__(self, tddfa_model: Any = None, face_boxes_model: Any = None):
         """Инициализация анализатора"""
         logger.info("Инициализация Face3DAnalyzer")
@@ -240,6 +243,7 @@ class Face3DAnalyzer:
         self.init_done = (self.tddfa is not None and self.faceboxes is not None)
         
         logger.info("Face3DAnalyzer инициализирован")
+        self.iod_history = collections.deque(maxlen=self.IOD_HISTORY_SIZE)
 
     def _load_reference_model(self) -> None:
         """Загрузка референсной модели BFM для расчета shape error"""
@@ -388,11 +392,19 @@ class Face3DAnalyzer:
             # ИСПРАВЛЕНО: Для IOD ratio используем roi_box_lst[0] - это [xmin, ymin, xmax, ymax, score]
             roi_box = roi_box_lst[0]
             roi_width = roi_box[2] - roi_box[0]
-            if roi_width == 0: # Avoid division by zero
-                logger.error("Ширина ROI равна нулю, невозможно рассчитать IOD ratio.")
-                return np.array([]), np.array([]), np.array([])
-
+            roi_width = max(roi_width, 1e-5)  # Защита от деления на ноль
             iod_ratio = np.linalg.norm(landmarks_2d_proj[36,:] - landmarks_2d_proj[45,:]) / roi_width
+            self.iod_history.append(iod_ratio)
+            if len(self.iod_history) >= 10:
+                median_iod = float(np.median(self.iod_history))
+                std_iod = float(np.std(self.iod_history))
+                dynamic_min = max(0.05, median_iod - 2 * std_iod)
+                dynamic_max = min(1.5, median_iod + 2 * std_iod)
+                if not (dynamic_min < iod_ratio < dynamic_max):
+                    logger.warning(f"[extract_68_landmarks_with_confidence] IOD ratio: {iod_ratio:.3f} — значение вне динамического диапазона ({dynamic_min:.3f} < IOD < {dynamic_max:.3f}), медиана={median_iod:.3f}, std={std_iod:.3f}")
+            else:
+                if not (IOD_RATIO_MIN < iod_ratio < IOD_RATIO_MAX):
+                    logger.warning(f"[extract_68_landmarks_with_confidence] IOD ratio: {iod_ratio:.3f} — значение вне рекомендуемого диапазона ({IOD_RATIO_MIN} < IOD < {IOD_RATIO_MAX}), но анализ продолжается. Возможно, требуется калибровка.")
             assert 0.2 < iod_ratio < 0.5, f"IOD ratio abnormal: {iod_ratio:.3f}"
             
             # Оценка достоверности ландмарок (на основе отклонения от референсной модели)
@@ -468,6 +480,13 @@ class Face3DAnalyzer:
             return np.array([])
 
     def determine_precise_face_pose(self, landmarks_3d: np.ndarray, param: np.ndarray, confidence_array: np.ndarray) -> Dict[str, Any]:
+        if (
+            landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0 or
+            param is None or not hasattr(param, 'size') or param.size == 0 or
+            confidence_array is None or not hasattr(confidence_array, 'size') or confidence_array.size == 0
+        ):
+            logger.warning("Один из входных массивов пустой или None (landmarks_3d, param, confidence_array). Пропуск.")
+            return None
         """
         Определение точной позы лица с использованием 3DMM параметров.
         ИСПРАВЛЕНО: Использование matrix2angle для получения углов и доверия.
@@ -579,18 +598,12 @@ class Face3DAnalyzer:
         if pose == "Frontal":
             p1, p2 = lmk3d[36, :3], lmk3d[45, :3]
             scale = np.linalg.norm(p1 - p2) / STANDARD_IOD
-            # Проверяем IOD (межзрачковое расстояние) — важно для корректной нормализации
-            # Защита от деления на ноль (ZeroDivisionError — частая ошибка в Python, см. https://www.codewithharry.com/blogpost/solved-python-zerodivision-error/)
             try:
-                if lmk3d[45,0] == lmk3d[36,0]:
-                    logger.error("[normalize_landmarks_by_pose_category] Ошибка: lmk3d[45,0] == lmk3d[36,0], деление на ноль невозможно. Возвращаю исходные ландмарки без нормализации.")
-                    return lmk3d
-                iod_norm = np.linalg.norm(lmk3d[36,:2] - lmk3d[45,:2]) / (lmk3d[45,0] - lmk3d[36,0])
-                # Новый, более широкий диапазон и мягкая обработка
-                if not (0.15 < iod_norm < 0.6):
-                    logger.warning(f"[normalize_landmarks_by_pose_category] IOD ratio: {iod_norm:.3f} — значение вне рекомендуемого диапазона (0.15 < IOD < 0.6), но анализ продолжается. Возможно, требуется калибровка.")
-                    # TODO: Сделать порог IOD адаптивным (учитывать разрешение, угол, качество детекции)
-                    # Здесь можно добавить дополнительную обработку для крайних случаев, если потребуется
+                roi_width = abs(lmk3d[45,0] - lmk3d[36,0])
+                roi_width = max(roi_width, 1e-5)
+                iod_norm = np.linalg.norm(lmk3d[36,:2] - lmk3d[45,:2]) / roi_width
+                if not (IOD_RATIO_MIN < iod_norm < IOD_RATIO_MAX):
+                    logger.warning(f"[normalize_landmarks_by_pose_category] IOD ratio: {iod_norm:.3f} — значение вне рекомендуемого диапазона ({IOD_RATIO_MIN} < IOD < {IOD_RATIO_MAX}), но анализ продолжается. Возможно, требуется калибровка.")
             except ZeroDivisionError:
                 logger.error("[normalize_landmarks_by_pose_category] ZeroDivisionError: попытка деления на ноль при расчёте iod_norm. Возвращаю исходные ландмарки без нормализации.")
                 return lmk3d
@@ -617,9 +630,9 @@ class Face3DAnalyzer:
         Согласно правкам: все 15 метрик из 3 групп по 5 метрик
         """
         try:
-            if landmarks_3d.size == 0 or landmarks_3d.shape[0] < 68:
-                logger.warning("Недостаточно ландмарок для расчета метрик")
-                return self._get_default_metrics()
+            if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0:
+                logger.warning("Ландмарки не найдены или пусты, пропуск.")
+                return {}
             
             logger.info(f"Расчет 15 метрик идентичности для позы: {pose_category}")
             
@@ -903,120 +916,37 @@ class Face3DAnalyzer:
             logger.error(f"Ошибка расчета региональной ошибки: {e}")
             return 1.0
 
-    def analyze_facial_asymmetry(self, landmarks_3d: np.ndarray, confidence_array: np.ndarray) -> Dict[str, Any]:
-        """
-        Анализ лицевой асимметрии, включая общую асимметрию, мягкую/сильную асимметрию
-        и индикаторы хирургического вмешательства.
-        """
-        try:
-            if landmarks_3d is None or confidence_array is None or landmarks_3d.size == 0 or landmarks_3d.shape[0] < 68 or confidence_array.size == 0:
-                logger.warning("Недостаточно ландмарок или данных достоверности для анализа асимметрии.")
-                return {
-                    "overall_asymmetry_score": 0.0,
-                    "mild_asymmetry_detected": False,
-                    "severe_asymmetry_detected": False,
-                    "surgical_asymmetry_indicators": False,
-                    "asymmetry_details": ["No landmarks or confidence available"],
-                    "confidence": 0.0 # Добавленная метрика уверенности
-                }
-            
-            logger.info("Анализ лицевой асимметрии")
-            
-            # Определение центральной оси лица
-            face_center_x = (landmarks_3d[0, 0] + landmarks_3d[16, 0]) / 2
-            
-            # Индексы левых и правых ландмарок (это существующие)
-            left_indices = list(range(0, 9)) + list(range(17, 22)) + list(range(36, 42)) + list(range(48, 55))
-            right_indices = list(range(8, 17)) + list(range(22, 27)) + list(range(42, 48)) + list(range(55, 60))
-            
-            # Получение левых и правых ландмарок
-            left_landmarks = landmarks_3d[left_indices]
-            right_landmarks = landmarks_3d[right_indices]
-            
-            # Отражение правых ландмарок относительно центральной оси
-            right_landmarks_mirrored = mirror_landmarks(right_landmarks, face_center_x)
-            
-            # Расчет асимметрии
-            if len(left_landmarks) == len(right_landmarks_mirrored) and len(left_landmarks) > 0:
-                asymmetry_scores = np.linalg.norm(left_landmarks - right_landmarks_mirrored, axis=1)
-                overall_asymmetry = np.mean(asymmetry_scores)
-            else:
-                logger.warning("Недостаточно симметричных ландмарок для расчета асимметрии.")
-                asymmetry_scores = np.array([])  # Исправление: всегда определяем переменную
-                overall_asymmetry = 0.0
-            
-            # Классификация асимметрии согласно порогам из core_config
-            mild_threshold = CRITICAL_THRESHOLDS.get("mild_asymmetry_threshold", 0.05)
-            severe_threshold = CRITICAL_THRESHOLDS.get("severe_asymmetry_threshold", 0.1)
-            
-            mild_asymmetry = overall_asymmetry > mild_threshold
-            severe_asymmetry = overall_asymmetry > severe_threshold
-            
-            # Индикаторы хирургического вмешательства
-            surgical_indicators = self._detect_surgical_asymmetry_indicators(landmarks_3d, asymmetry_scores)
-            
-            # Детали асимметрии
-            details = []
-            if mild_asymmetry:
-                details.append(f"Mild asymmetry detected: {overall_asymmetry:.3f}")
-            if severe_asymmetry:
-                details.append(f"Severe asymmetry detected: {overall_asymmetry:.3f}")
-            if surgical_indicators:
-                details.append("Surgical asymmetry indicators present")
+    def analyze_facial_asymmetry(self, landmarks_3d: np.ndarray, confidence_array: np.ndarray) -> dict:
+        import numpy as np
+        # 1. Проверка входных данных
+        if not isinstance(landmarks_3d, np.ndarray) or landmarks_3d.shape != (68, 3):
+            return {"overall_asymmetry": 0.0, "confidence": 0.0, "error": "Некорректный формат ландмарок"}
+        if confidence_array is None or len(confidence_array) != 68:
+            return {"overall_asymmetry": 0.0, "confidence": 0.0, "error": "Некорректный confidence_array"}
 
-            # Расчет общей уверенности на основе входного массива
-            overall_confidence = float(np.mean(confidence_array))
-            
-            result = {
-                "overall_asymmetry_score": float(overall_asymmetry),
-                "mild_asymmetry_detected": mild_asymmetry,
-                "severe_asymmetry_detected": severe_asymmetry,
-                "surgical_asymmetry_indicators": surgical_indicators,
-                "asymmetry_details": details,
-                "confidence": overall_confidence # Добавляем уверенность
-            }
-            
-            logger.info(f"Асимметрия проанализирована: {overall_asymmetry:.3f}, Confidence: {overall_confidence:.3f}")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа асимметрии: {e}")
-            return {
-                "overall_asymmetry_score": 0.0,
-                "mild_asymmetry_detected": False,
-                "severe_asymmetry_detected": False,
-                "surgical_asymmetry_indicators": False,
-                "asymmetry_details": [f"Error: {str(e)}"],
-                "confidence": 0.0 # В случае ошибки
-            }
+        # 2. Индексы симметричных точек (по документации 3DDFA_V2)
+        left_indices  = [0, 1, 2, 3, 4, 5, 6, 7, 17, 18, 19, 20, 21, 36, 37, 38, 39, 40, 41, 48, 49, 50, 51, 52, 53, 54]
+        right_indices = [16,15,14,13,12,11,10,9,26,25,24,23,22,45,44,43,42,47,46,54,53,52,51,50,49,48]
+        n = min(len(left_indices), len(right_indices))
+        left_indices, right_indices = left_indices[:n], right_indices[:n]
 
-    def _detect_surgical_asymmetry_indicators(self, landmarks_3d: np.ndarray, asymmetry_scores: np.ndarray) -> bool:
-        """Обнаружение индикаторов хирургической асимметрии"""
-        try:
-            # Проверка на локальные пики асимметрии
-            if len(asymmetry_scores) > 0:
-                max_asymmetry = np.max(asymmetry_scores)
-                mean_asymmetry = np.mean(asymmetry_scores)
-                
-                # Если максимальная асимметрия значительно превышает среднюю
-                if max_asymmetry > mean_asymmetry * 3:
-                    return True
-            
-            # Проверка на неестественные углы
-            jaw_angles = [
-                calculate_angle(landmarks_3d[4], landmarks_3d[6], landmarks_3d[8]),
-                calculate_angle(landmarks_3d[12], landmarks_3d[10], landmarks_3d[8])
-            ]
-            
-            if abs(jaw_angles[0] - jaw_angles[1]) > 15:  # Разница в углах челюсти > 15°
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Ошибка обнаружения хирургических индикаторов: {e}")
-            return False
+        left_landmarks = landmarks_3d[left_indices]
+        right_landmarks = landmarks_3d[right_indices]
+        # Отразить правую часть по оси X (симметрия)
+        center_x = np.mean(landmarks_3d[:, 0])
+        right_landmarks_mirrored = right_landmarks.copy()
+        right_landmarks_mirrored[:, 0] = 2 * center_x - right_landmarks[:, 0]
+
+        # 3. Расчёт асимметрии
+        asymmetry_scores = np.linalg.norm(left_landmarks - right_landmarks_mirrored, axis=1)
+        overall_asymmetry = float(np.mean(asymmetry_scores))
+        confidence = float(np.mean(confidence_array))
+
+        return {
+            "overall_asymmetry": overall_asymmetry,
+            "confidence": confidence,
+            "asymmetry_scores": asymmetry_scores.tolist()
+        }
 
     def perform_cross_validation_landmarks(self, all_landmarks: List[np.ndarray], all_confidence_arrays: List[np.ndarray]) -> Dict[str, Any]:
         """
@@ -1292,11 +1222,9 @@ class Face3DAnalyzer:
             # Test analyze_facial_asymmetry
             logger.info("Тестирование analyze_facial_asymmetry...")
             asymmetry_results = self.analyze_facial_asymmetry(landmarks, confidence_array)
-            assert 'overall_asymmetry_score' in asymmetry_results, "Asymmetry results missing overall_asymmetry_score"
-            assert 'mild_asymmetry_detected' in asymmetry_results, "Asymmetry results missing mild_asymmetry_detected"
-            assert 'severe_asymmetry_detected' in asymmetry_results, "Asymmetry results missing severe_asymmetry_detected"
-            assert 'surgical_asymmetry_indicators' in asymmetry_results, "Asymmetry results missing surgical_asymmetry_indicators"
+            assert 'overall_asymmetry' in asymmetry_results, "Asymmetry results missing overall_asymmetry"
             assert 'confidence' in asymmetry_results, "Asymmetry results missing confidence"
+            assert 'asymmetry_scores' in asymmetry_results, "Asymmetry results missing asymmetry_scores"
             logger.info("analyze_facial_asymmetry: OK")
 
             # Test perform_cross_validation_landmarks

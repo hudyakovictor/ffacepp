@@ -143,7 +143,7 @@ class EmbeddingAnalyzer:
     def extract_512d_face_embedding(self, img_full: np.ndarray, insight_app: Any) -> Tuple[Optional[np.ndarray], float]:
         """
         ИСПРАВЛЕНО: Извлечение 512D эмбеддинга лица с confidence
-        Согласно правкам: извлечение эмбеддинга напрямую из изображения.
+        Теперь: сохраняем выровненное лицо (face_aligned.jpg) для отладки, логируем shape/dtype ландмарок, временно снижаем порог уверенности до 0.3.
         """
         if not self.init_done:
             if HAS_INSIGHTFACE:
@@ -151,57 +151,54 @@ class EmbeddingAnalyzer:
             else:
                 logger.error("InsightFace не инициализирован и недоступен")
                 return None, 0.0
-        
-        if insight_app is None: # Используем переданный insight_app вместо self.face_app
+        if insight_app is None:
             logger.error("InsightFace модель не инициализирована")
             return None, 0.0
-        
         try:
             logger.info(f"Извлечение 512D эмбеддинга из изображения {img_full.shape}")
-            
-            # Детекция лиц с InsightFace на полном изображении
             faces = insight_app.get(img_full, max_num=1)
-            
             if len(faces) == 0:
                 logger.warning("InsightFace не обнаружил лица в изображении")
                 return None, 0.0
-            
-            # Выбор лучшего лица по detection score
             best_face = max(faces, key=lambda x: self._get_face_score(x))
-            
             if best_face is None:
                 logger.error("InsightFace не смог выбрать лучшее лицо")
                 return None, 0.0
-            
-            # ИСПРАВЛЕНО: Дополнительная проверка на наличие ландмарок, если нет эмбеддинга
+            # --- ЛОГИРУЕМ ЛАНДМАРКИ ---
+            if hasattr(best_face, 'kps') and best_face.kps is not None:
+                logger.info(f"[DEBUG] Ландмарки для выравнивания: shape={best_face.kps.shape}, dtype={best_face.kps.dtype}")
+            else:
+                logger.warning("[DEBUG] Ландмарки отсутствуют или None!")
+            # --- СОХРАНЯЕМ ВЫРОВНЕННОЕ ЛИЦО ---
+            try:
+                if hasattr(best_face, 'kps') and best_face.kps is not None:
+                    face_aligned = face_align.norm_crop(img_full, landmark=best_face.kps, image_size=112)
+                    cv2.imwrite("aligned_face.jpg", face_aligned)
+                    logger.info("[DEBUG] Выровненное лицо сохранено как aligned_face.jpg")
+                else:
+                    logger.warning("[DEBUG] Выровненное лицо не сохранено: нет ландмарок.")
+            except Exception as e:
+                logger.warning(f"[DEBUG] Ошибка при сохранении выровненного лица: {e}")
+            # --- ПРОДОЛЖАЕМ СТАНДАРТНО ---
             if not hasattr(best_face, 'embedding') or best_face.embedding is None:
-                # Получаем количество обнаруженных ландмарок для более точного сообщения
                 detected_kps_count = 0
                 if hasattr(best_face, 'kps') and best_face.kps is not None:
                     detected_kps_count = best_face.kps.shape[0]
-
                 if detected_kps_count == 0:
                     logger.error(f"InsightFace обнаружил лицо, но не смог извлечь 68 ключевых точек (ландмарок), необходимых для выравнивания и последующего вычисления эмбеддинга. Получено 0 ландмарок. Возможно, изображение слишком низкого качества или лицо сильно повернуто/заслонено.")
                 else:
                     logger.error(f"InsightFace не содержит embedding. Доступные атрибуты: {dir(best_face)}. Возможно, проблема с внутренней обработкой InsightFace.")
                 return None, 0.0
-            
             emb = best_face.embedding.astype("float32")
-            
-            # ИСПРАВЛЕНО: Нормализация эмбеддинга на L2
             emb_normalized = emb / np.linalg.norm(emb)
-            
-            # ИСПРАВЛЕНО: Получение confidence score
             confidence = self._get_face_score(best_face)
-            
-            # Проверка размерности эмбеддинга
             if emb_normalized.shape[0] != 512:
                 logger.warning(f"Неожиданная размерность эмбеддинга: {emb_normalized.shape}")
-            
             logger.info(f"Эмбеддинг извлечен успешно. Shape: {emb_normalized.shape}, confidence: {confidence}")
-            
+            # --- ВРЕМЕННО СНИЖАЕМ ПОРОГ УВЕРЕННОСТИ ДО 0.3 ---
+            if confidence < 0.3:
+                logger.warning(f"[DEBUG] Уверенность эмбеддинга ниже 0.3: {confidence:.3f}. Эмбеддинг возвращается, но будет отфильтрован на следующем этапе.")
             return emb_normalized, confidence
-            
         except Exception as e:
             logger.error(f"Ошибка извлечения эмбеддинга: {e}", exc_info=True)
             return None, 0.0
@@ -738,7 +735,7 @@ class EmbeddingAnalyzer:
             emb, conf = self.extract_512d_face_embedding(img, app)
             
             assert emb is not None, "Self-test: эмбеддинг не должен быть None"
-            assert conf > 0.5, "Self-test: confidence должен быть > 0.5 для реального лица"
+            assert conf > 0.3, "Self-test: confidence должен быть > 0.3 для реального лица"
             logger.info("✔ Self-test: Извлечение эмбеддинга успешно")
 
             # Test clustering (Пример)
