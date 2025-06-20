@@ -24,8 +24,8 @@ import cv2
 import os
 from PIL import Image
 
-# Удаляю настройку логгера (logging.basicConfig и создание хендлеров) из этого файла, оставляю только получение логгера через logging.getLogger(__name__).
-logger = logging.getLogger(__name__)
+# Получение логгера
+logger = logging.getLogger()
 
 # Импорт компонентов системы
 try:

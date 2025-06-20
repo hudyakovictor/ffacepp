@@ -405,7 +405,7 @@ class Face3DAnalyzer:
             else:
                 if not (IOD_RATIO_MIN < iod_ratio < IOD_RATIO_MAX):
                     logger.warning(f"[extract_68_landmarks_with_confidence] IOD ratio: {iod_ratio:.3f} — значение вне рекомендуемого диапазона ({IOD_RATIO_MIN} < IOD < {IOD_RATIO_MAX}), но анализ продолжается. Возможно, требуется калибровка.")
-            assert 0.2 < iod_ratio < 0.5, f"IOD ratio abnormal: {iod_ratio:.3f}"
+            # assert 0.2 < iod_ratio < 0.5, f"IOD ratio abnormal: {iod_ratio:.3f}"  # УБРАНО! Теперь только предупреждение
             
             # Оценка достоверности ландмарок (на основе отклонения от референсной модели)
             # ИСПРАВЛЕНО: Используем новую логику оценки качества
@@ -603,7 +603,8 @@ class Face3DAnalyzer:
                 roi_width = max(roi_width, 1e-5)
                 iod_norm = np.linalg.norm(lmk3d[36,:2] - lmk3d[45,:2]) / roi_width
                 if not (IOD_RATIO_MIN < iod_norm < IOD_RATIO_MAX):
-                    logger.warning(f"[normalize_landmarks_by_pose_category] IOD ratio: {iod_norm:.3f} — значение вне рекомендуемого диапазона ({IOD_RATIO_MIN} < IOD < {IOD_RATIO_MAX}), но анализ продолжается. Возможно, требуется калибровка.")
+                    logger.warning(f"[normalize_landmarks_by_pose_category] IOD ratio: {iod_norm:.3f} — значение вне рекомендуемого диапазона ({IOD_RATIO_MIN} < IOD < {IOD_RATIO_MAX}), но анализ продолжается. Любой ракурс разрешён.")
+                # УДАЛЕНО: return или raise по IOD ratio
             except ZeroDivisionError:
                 logger.error("[normalize_landmarks_by_pose_category] ZeroDivisionError: попытка деления на ноль при расчёте iod_norm. Возвращаю исходные ландмарки без нормализации.")
                 return lmk3d

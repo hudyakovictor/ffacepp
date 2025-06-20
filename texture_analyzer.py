@@ -719,9 +719,10 @@ class TextureAnalyzer:
         ИСПРАВЛЕНО: Расчет оценки аутентичности материала
         Согласно правкам: учет всех зон с правильными весами
         """
-        if texture_metrics is None or not hasattr(texture_metrics, 'size') or texture_metrics.size == 0:
-            logger.warning("Пустые метрики текстуры для расчета аутентичности")
-            return np.nan
+        # Проверка на пустые или невалидные значения
+        if not texture_metrics or any(v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))) for v in texture_metrics.values()):
+            logging.getLogger().error("[TextureAnalyzer] Пустые или невалидные метрики текстуры для расчёта аутентичности. Возвращаю 0.0.")
+            return 0.0
         
         try:
             logger.info("Расчет оценки аутентичности материала")

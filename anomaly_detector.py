@@ -334,13 +334,18 @@ class AnomalyDetector:
                 "all_levels_passed": False
             }
 
-    def calculate_identity_authenticity_score(self, geometry: float, embedding: float, 
-                                            texture: float, temporal_consistency: float) -> float:
+    def calculate_identity_authenticity_score(self, geometry: float, embedding: float, texture: float, temporal_consistency: float) -> float:
         """
         ИСПРАВЛЕНО: Расчет итогового authenticity score
         Согласно правкам: использование весов из coreconfig
         """
         try:
+            # Проверка на nan/None/inf
+            for v in [geometry, embedding, texture, temporal_consistency]:
+                if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
+                    logging.getLogger().error(f"[AnomalyDetector] Невалидный балл для расчёта аутентичности: {v}. Возвращаю 0.0.")
+                    return 0.0
+            
             logger.info("Расчет итогового authenticity score")
             
             # ИСПРАВЛЕНО: Использование весов из AUTHENTICITY_WEIGHTS

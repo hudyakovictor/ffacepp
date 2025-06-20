@@ -222,74 +222,48 @@ class DataProcessor:
         """
         try:
             logger.debug(f"Начинаем обработку файла: {filepath}")
-            # Проверка кэша
             cache_key = self.get_cache_key(filepath)
             if cache_key in self.results_cache:
                 self.processing_stats["cache_hits"] += 1
-                logger.debug(f"Результат для {filepath} найден в кэше. Пропускаем анализ.")
+                logger.debug(f"Результат найден в кэше: {filepath}")
                 return self.results_cache[cache_key]
-            self.processing_stats["cache_misses"] += 1
-            logger.debug(f"Результат для {filepath} не найден в кэше. Выполняем полный анализ.")
-            # Загрузка изображения (уже гарантирует np.ndarray)
             image = await self.load_image_async(filepath)
-            # Валидация качества изображения
-            quality_result = self.data_manager.validate_image_quality_for_analysis(image)
-            if quality_result.get("quality_score", 0) < CRITICAL_THRESHOLDS.get("min_quality_score", 0.6):
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Файл '{filepath}' имеет низкое качество ({quality_result.get('quality_score', 0):.2f}). Будет отмечен как аномалия.{Colors.RESET}")
-                return AnalysisResult(
-                    filepath=filepath,
-                    timestamp=datetime.now().isoformat(),
-                    authenticity_score=0.0,
-                    anomalies={"quality_error": ERROR_CODES["E002"]},
-                    metrics={},
-                    metadata={"error": "Низкое качество изображения", "quality_score": quality_result.get("quality_score", 0)}
-                )
-            # Асинхронный анализ 3D лица
-            analysis_3d_result = await self.analyze_3d_async(image)
-            landmarks68 = analysis_3d_result.get("landmarks68")
-            # Проверка, что landmarks68 не None перед вызовом analyze_embedding_async
-            if landmarks68 is None or not hasattr(landmarks68, 'size') or landmarks68.size == 0:
+            if image is None:
+                logger.warning(f"[DataProcessor] Не удалось загрузить изображение: {filepath}")
+                return AnalysisResult(filepath, str(datetime.now()), 0.0, {"processing_error": "Не удалось загрузить изображение"}, {}, {"error": "Не удалось загрузить изображение"})
+            analysis_3d = await self.analyze_3d_async(image)
+            # КОРРЕКТНО: Проверяем только, что landmarks_3d есть и размер > 0
+            if not analysis_3d or 'landmarks_3d' not in analysis_3d or analysis_3d['landmarks_3d'] is None or (hasattr(analysis_3d['landmarks_3d'], 'size') and analysis_3d['landmarks_3d'].size == 0):
                 logger.warning(f"[DataProcessor] Ландмарки не найдены для файла {filepath}. Пропускаем анализ эмбеддингов.")
-                embedding_result = {"error": "No landmarks for embedding analysis"}
-            else:
-                # Вызов analyze_embedding_async с передачей image и landmarks68, а также insight_app
-                embedding_result = await self.analyze_embedding_async(
-                    image=image,
-                    landmarks=landmarks68,
-                    insight_app=self.embedding_analyzer.face_app # Передача экземпляра insight_app
-                )
+                return AnalysisResult(filepath, str(datetime.now()), 0.0, {"processing_error": "Лицо не обнаружено"}, {}, {"error": "Лицо не обнаружено"})
+            # Анализ эмбеддинга
+            analysis_embedding = await self.analyze_embedding_async(image, analysis_3d['landmarks_3d'], self.embedding_analyzer.face_app)
             # Анализ текстуры
-            texture_result = {}
-            if landmarks68 is None or landmarks68.size == 0:
-                logger.warning(f"[DataProcessor] Ландмарки не найдены для файла {filepath}. Пропускаем анализ текстуры.")
-                texture_result = {"error": "No landmarks for texture analysis"}
-            else:
-                texture_result = await self.analyze_texture_async(
-                    image=image,
-                    landmarks=landmarks68
-                )
-            analysis_results = {
-                "3d_analysis": analysis_3d_result,
-                "embedding": embedding_result,
-                "texture": texture_result
-            }
-            # Агрегация результатов и кэширование
-            final_result = self.aggregate_analysis_results(filepath, analysis_results, quality_result)
-            self._cache_result(cache_key, final_result)
-            logger.debug(f"Завершено обработка файла: {filepath}")
-            return final_result
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            logger.error(f"{Colors.RED}ОШИБКА при обработке файла {filepath}: {e}{Colors.RESET}\n{tb}")
-            return AnalysisResult(
-                filepath=filepath,
-                timestamp=datetime.now().isoformat(),
-                authenticity_score=0.0,
-                anomalies={"processing_error": "Внутренняя ошибка анализа файла. Возможно, не удалось найти лицо или файл повреждён."},
-                metrics={},
-                metadata={"error": str(e), "traceback": tb}
+            analysis_texture = await self.analyze_texture_async(image, analysis_3d['landmarks_3d'])
+            # Сбор метрик
+            geometry_score = analysis_3d.get('geometry_score', None)
+            embedding_score = analysis_embedding.get('embedding_score', None)
+            texture_score = analysis_texture.get('texture_score', None)
+            temporal_score = 1.0  # если нет временного анализа
+            import math
+            if any(x is None or (isinstance(x, float) and math.isnan(x)) for x in [geometry_score, embedding_score, texture_score, temporal_score]):
+                logger.error(f"[DataProcessor] Итоговый authenticity_score невалиден (nan/None) для файла {filepath}")
+                return AnalysisResult(filepath, str(datetime.now()), 0.0, {"empty_score": "Не удалось рассчитать итоговый балл (nan/None)"}, {}, {"error": "authenticity_score nan/None"})
+            authenticity_score = self.anomaly_detector.calculate_identity_authenticity_score(
+                geometry=geometry_score,
+                embedding=embedding_score,
+                texture=texture_score,
+                temporal_consistency=temporal_score
             )
+            if authenticity_score is None or (isinstance(authenticity_score, float) and math.isnan(authenticity_score)):
+                logger.error(f"[DataProcessor] Итоговый authenticity_score nan/None для файла {filepath}")
+                return AnalysisResult(filepath, str(datetime.now()), 0.0, {"empty_score": "Не удалось рассчитать итоговый балл (nan/None)"}, {}, {"error": "authenticity_score nan/None"})
+            result = AnalysisResult(filepath, str(datetime.now()), authenticity_score, {}, {}, {})
+            self._cache_result(cache_key, result)
+            return result
+        except Exception as e:
+            logger.error(f"[DataProcessor] Внутренняя ошибка анализа файла {filepath}: {e}")
+            return AnalysisResult(filepath, str(datetime.now()), 0.0, {"processing_error": str(e)}, {}, {"error": str(e)})
 
     async def load_image_async(self, filepath: str) -> Optional[np.ndarray]:
         """
@@ -312,37 +286,48 @@ class DataProcessor:
         def analyze():
             if not self.face_analyzer:
                 raise RuntimeError("Face3DAnalyzer не инициализирован.")
-            
-            # Используем self.face_analyzer.tddfa и self.face_analyzer.faceboxes
-            # Передача моделей в extract_68_landmarks_with_confidence
             landmarks, confidence, param = self.face_analyzer.extract_68_landmarks_with_confidence(
                 image, models={"tddfa": self.face_analyzer.tddfa, "face_boxes": self.face_analyzer.faceboxes})
-            
-            if landmarks.size == 0:
+            if landmarks is None or not hasattr(landmarks, 'size') or landmarks.size == 0:
                 logger.warning("3D анализ: ландмарки не обнаружены.")
-                return {"status": "failed", "error": ERROR_CODES["E001"], "landmarks": [], "pose": {}}
-
-            # Остальные 3D-метрики
-            pose = self.face_analyzer.determine_precise_face_pose(landmarks, param, confidence)
-            # Получение нормализованных ландмарок
+                return {"status": "failed", "error": ERROR_CODES["E001"], "landmarks_3d": None, "pose": {}}
+            # 3. Определение позы
+            logger.info(f"[DEBUG] Определение позы лица...")
+            pose_analysis = self.face_analyzer.determine_precise_face_pose(landmarks, param, confidence)
+            logger.info(f"[DEBUG] pose_analysis: {pose_analysis}")
+            print(f"[DEBUG] pose_analysis: {pose_analysis}")
+            if pose_analysis is None or not isinstance(pose_analysis, dict):
+                print(f"[DEBUG] Ошибка определения позы лица")
+                return {"status": "failed", "error": ERROR_CODES["E001"], "landmarks_3d": None, "pose": {}}
+            pose_category = pose_analysis.get("pose_category", "Frontal")
+            if pose_category == "Unknown" or pose_category == "Error":
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось определить позу для {filepath}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось определить позу лица")
+                return {"status": "failed", "error": ERROR_CODES["E001"], "landmarks_3d": None, "pose": {}}
+            # 4. Нормализация ландмарок
+            logger.info(f"[DEBUG] Нормализация ландмарок...")
             vis = landmarks[:,2] > MIN_VISIBILITY_Z
-            normalized_landmarks = self.face_analyzer.normalize_landmarks_by_pose_category(
-                landmarks,
-                pose.get("pose_category", "frontal"),
-                vis
-            )
-            shape_error = self.face_analyzer.calculate_comprehensive_shape_error(normalized_landmarks)
-            asymmetry = self.face_analyzer.analyze_facial_asymmetry(landmarks, confidence) # Используем ненормализованные ландмарки для асимметрии
-            
+            if pose_category in ["Frontal", "Frontal_Edge", "Semi-Profile", "Profile"]:
+                norm_landmarks = self.face_analyzer.normalize_landmarks_by_pose_category(landmarks, pose_category, vis)
+            else:
+                logger.warning(f"Неизвестная категория позы: {pose_category}, используем Frontal по умолчанию")
+                norm_landmarks = self.face_analyzer.normalize_landmarks_by_pose_category(landmarks, "Frontal", vis)
+            logger.info(f"[DEBUG] norm_landmarks: {type(norm_landmarks)}, shape: {getattr(norm_landmarks, 'shape', None)}, size: {getattr(norm_landmarks, 'size', None)}")
+            print(f"[DEBUG] norm_landmarks: {type(norm_landmarks)}, shape: {getattr(norm_landmarks, 'shape', None)}, size: {getattr(norm_landmarks, 'size', None)}")
+            if norm_landmarks is None or not hasattr(norm_landmarks, 'size') or norm_landmarks.size == 0:
+                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось нормализовать ландмарки для {filepath}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось нормализовать ландмарки лица")
+                return {"status": "failed", "error": ERROR_CODES["E001"], "landmarks_3d": None, "pose": {}}
+            shape_error = self.face_analyzer.calculate_comprehensive_shape_error(norm_landmarks)
+            asymmetry = self.face_analyzer.analyze_facial_asymmetry(landmarks, confidence)
             return {
                 "status": "success",
-                "landmarks": landmarks.tolist(),
-                "pose": pose,
+                "landmarks_3d": landmarks,
+                "pose": pose_analysis,
                 "shape_error": shape_error,
                 "asymmetry": asymmetry,
-                "confidence_3d_landmarks": np.mean(confidence).item() # Средняя уверенность по ландмаркам
+                "confidence_3d_landmarks": float(np.mean(confidence)) if confidence is not None else 0.0
             }
-        
         result = await loop.run_in_executor(None, analyze)
         self.total_images_processed += 1
         if result.get('error', '').lower().find('лицо не обнаружено') != -1:
@@ -359,16 +344,16 @@ class DataProcessor:
         
         try:
             # ИСПРАВЛЕНО: Передача полного изображения, 68 ландмарок и insight_app
-            embedding, confidence = self.embedding_analyzer.extract_512d_face_embedding(image, landmarks, insight_app)
+            emb, emb_conf = self.embedding_analyzer.extract_512d_face_embedding(image, insight_app)
             
-            if embedding is None or not hasattr(embedding, 'size') or embedding.size == 0:
+            if emb is None or not hasattr(emb, 'size') or emb.size == 0:
                 logger.warning("InsightFace не обнаружил лица в изображении")
                 return {"status": "failed", "error": ERROR_CODES["E001"], "embedding": []}
             
             return {
                 "status": "success",
-                "embedding": embedding.tolist(),
-                "confidence_embedding": confidence
+                "embedding": emb.tolist(),
+                "confidence_embedding": emb_conf
             }
             
         except Exception as e:

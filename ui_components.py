@@ -16,8 +16,8 @@ import json
 import logging
 from pathlib import Path
 
-# Получение логгера через logging.getLogger(__name__)
-logger = logging.getLogger(__name__)
+# Получение логгера через logging.getLogger()
+logger = logging.getLogger()
 
 # ==================== БАЗОВЫЙ КЛАСС ====================
 

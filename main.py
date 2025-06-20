@@ -21,6 +21,7 @@ import warnings
 import uuid
 import psutil
 import time
+import math
 
 # === ГАРАНТИРОВАННОЕ СОЗДАНИЕ ПАПКИ ДЛЯ ЛОГОВ ===
 os.makedirs("logs", exist_ok=True)
@@ -69,13 +70,22 @@ class JSONLFormatter(logging.Formatter):
         }
         return json.dumps(log_record, ensure_ascii=False)
 
-# Настройка логгера на JSONL
+# Настройка root-логгера
 logger = logging.getLogger()
 for h in logger.handlers:
     logger.removeHandler(h)
 file_handler = logging.FileHandler(f"logs/session_{RUN_UUID}.jsonl", mode="a", encoding="utf-8")
 file_handler.setFormatter(JSONLFormatter())
 logger.addHandler(file_handler)
+
+log_file_handler = logging.FileHandler('logs/main.log')
+log_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'))
+logger.addHandler(log_file_handler)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(ColoredFormatter())
+logger.addHandler(console_handler)
+
 logger.setLevel(logging.INFO)
 
 # Автоматическое повышение уровня логирования при ошибках
@@ -94,23 +104,6 @@ class AutoDebugHandler(logging.Handler):
 
 logger.addHandler(AutoDebugHandler())
 
-# Настройка логирования
-log_file_handler = logging.FileHandler('logs/main.log')
-log_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'))
-
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(ColoredFormatter())
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    handlers=[
-        log_file_handler,
-        console_handler
-    ]
-)
-logger = logging.getLogger(__name__)
-
-print("DEBUG: Импортирую все модули...")
 # ИСПРАВЛЕНО: Импорт всех модулей с ОРИГИНАЛЬНЫМИ названиями
 try:
     from core_config import (
@@ -603,91 +596,138 @@ class FaceAuthenticitySystem:
         face_analyzer = self.components['face_3d_analyzer']
         data_manager = self.components['data_manager']
         
-        logger.info(f"Анализ изображения: {image_path}")
-        
+        logger.info(f"[DEBUG] === НАЧАЛО анализа изображения: {image_path}")
+        print(f"[DEBUG] === НАЧАЛО анализа изображения: {image_path}")
         try:
             img = cv2.imread(image_path)
             if img is None:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось загрузить изображение {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось загрузить изображение: {image_path}")
                 return {"path": image_path, "error": "Не удалось загрузить изображение (файл повреждён или не поддерживается)"}
+            logger.info(f"[DEBUG] Изображение загружено: shape={img.shape}, dtype={img.dtype}")
+            print(f"[DEBUG] Изображение загружено: shape={img.shape}, dtype={img.dtype}")
 
             # 1. Валидация качества изображения
+            logger.info(f"[DEBUG] Валидация качества изображения...")
             quality_results = data_manager.validate_image_quality_for_analysis(img)
+            logger.info(f"[DEBUG] Результат валидации качества: {quality_results}")
+            print(f"[DEBUG] Результат валидации качества: {quality_results}")
             if quality_results is None or not isinstance(quality_results, dict):
+                print(f"[DEBUG] Ошибка валидации качества изображения")
                 return {"path": image_path, "error": "Ошибка валидации качества изображения"}
             if quality_results.get('quality_score', 0) < CRITICAL_THRESHOLDS["min_quality_score"]:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкое качество изображения {image_path} (score: {quality_results.get('quality_score', 0):.2f}).{Colors.RESET}")
+                print(f"[DEBUG] Слишком низкое качество изображения для анализа")
                 return {"path": image_path, "quality_issues": quality_results.get("issues", []), "quality_score": quality_results.get("quality_score", 0), "error": "Слишком низкое качество изображения для анализа"}
 
             # 2. Извлечение 68 ландмарок
+            logger.info(f"[DEBUG] Извлечение 68 ландмарок...")
+            print(f"[DEBUG] Извлечение 68 ландмарок...")
             landmarks_3d, confidence_array, param = face_analyzer.extract_68_landmarks_with_confidence(img, models={'tddfa': face_analyzer.tddfa, 'face_boxes': face_analyzer.faceboxes})
+            logger.info(f"[DEBUG] landmarks_3d: {type(landmarks_3d)}, shape: {getattr(landmarks_3d, 'shape', None)}, size: {getattr(landmarks_3d, 'size', None)}")
+            logger.info(f"[DEBUG] confidence_array: {type(confidence_array)}, shape: {getattr(confidence_array, 'shape', None)}, size: {getattr(confidence_array, 'size', None)}")
+            logger.info(f"[DEBUG] param: {type(param)}, shape: {getattr(param, 'shape', None)}, size: {getattr(param, 'size', None)}")
+            print(f"[DEBUG] landmarks_3d: {type(landmarks_3d)}, shape: {getattr(landmarks_3d, 'shape', None)}, size: {getattr(landmarks_3d, 'size', None)}")
+            print(f"[DEBUG] confidence_array: {type(confidence_array)}, shape: {getattr(confidence_array, 'shape', None)}, size: {getattr(confidence_array, 'size', None)}")
+            print(f"[DEBUG] param: {type(param)}, shape: {getattr(param, 'shape', None)}, size: {getattr(param, 'size', None)}")
             if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Лицо не обнаружено на изображении {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Лицо не обнаружено на изображении")
                 return {"path": image_path, "error": "Лицо не обнаружено на изображении. Попробуйте другое фото с чётким лицом."}
             if confidence_array is None or not hasattr(confidence_array, 'size') or confidence_array.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Confidence array пустой для {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Confidence array пустой")
                 return {"path": image_path, "error": "Ошибка извлечения ландмарок лица (confidence пустой)"}
             if param is None or not hasattr(param, 'size') or param.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Параметры модели пустые для {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Параметры модели пустые")
                 return {"path": image_path, "error": "Ошибка извлечения параметров модели лица"}
 
             # 3. Определение позы
+            logger.info(f"[DEBUG] Определение позы лица...")
             pose_analysis = face_analyzer.determine_precise_face_pose(landmarks_3d, param, confidence_array)
+            logger.info(f"[DEBUG] pose_analysis: {pose_analysis}")
+            print(f"[DEBUG] pose_analysis: {pose_analysis}")
             if pose_analysis is None or not isinstance(pose_analysis, dict):
+                print(f"[DEBUG] Ошибка определения позы лица")
                 return {"path": image_path, "error": "Ошибка определения позы лица"}
             pose_category = pose_analysis.get("pose_category", "Unknown")
             if pose_category == "Unknown" or pose_category == "Error":
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось определить позу для {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось определить позу лица")
                 return {"path": image_path, "error": "Не удалось определить позу лица"}
 
             # 4. Нормализация ландмарок
+            logger.info(f"[DEBUG] Нормализация ландмарок...")
             vis = landmarks_3d[:,2] > MIN_VISIBILITY_Z
             norm_landmarks = face_analyzer.normalize_landmarks_by_pose_category(landmarks_3d, pose_category, vis)
+            logger.info(f"[DEBUG] norm_landmarks: {type(norm_landmarks)}, shape: {getattr(norm_landmarks, 'shape', None)}, size: {getattr(norm_landmarks, 'size', None)}")
+            print(f"[DEBUG] norm_landmarks: {type(norm_landmarks)}, shape: {getattr(norm_landmarks, 'shape', None)}, size: {getattr(norm_landmarks, 'size', None)}")
             if norm_landmarks is None or not hasattr(norm_landmarks, 'size') or norm_landmarks.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось нормализовать ландмарки для {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось нормализовать ландмарки лица")
                 return {"path": image_path, "error": "Не удалось нормализовать ландмарки лица"}
 
             # 5. Расчет метрик идентичности
+            logger.info(f"[DEBUG] Расчет метрик идентичности...")
             metrics = face_analyzer.calculate_identity_signature_metrics(norm_landmarks, pose_category)
+            logger.info(f"[DEBUG] metrics: {metrics}")
+            print(f"[DEBUG] metrics: {metrics}")
             if metrics is None or not isinstance(metrics, dict) or len(metrics) == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось рассчитать метрики для {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось рассчитать метрики идентичности")
                 return {"path": image_path, "error": "Не удалось рассчитать метрики идентичности"}
 
             # 6. Проверка shape error (если используется)
             if hasattr(face_analyzer, 'calculate_comprehensive_shape_error'):
                 try:
+                    logger.info(f"[DEBUG] Расчет shape error...")
                     shape_error = face_analyzer.calculate_comprehensive_shape_error(norm_landmarks)
+                    logger.info(f"[DEBUG] shape_error: {shape_error}")
+                    print(f"[DEBUG] shape_error: {shape_error}")
                     if shape_error is None or not isinstance(shape_error, dict):
+                        print(f"[DEBUG] Ошибка расчёта shape error")
                         return {"path": image_path, "error": "Ошибка расчёта shape error"}
                 except Exception as e:
+                    print(f"[DEBUG] Ошибка shape error: {str(e)}")
                     return {"path": image_path, "error": f"Ошибка shape error: {str(e)}"}
 
             # 7. Проверка асимметрии (если используется)
             if hasattr(face_analyzer, 'analyze_facial_asymmetry'):
                 try:
-                    logger.info(f"[DEBUG] Перед анализом асимметрии: type(landmarks_3d)={type(landmarks_3d)}, shape={getattr(landmarks_3d, 'shape', None)}, size={getattr(landmarks_3d, 'size', None)}")
-                    logger.info(f"[DEBUG] Перед анализом асимметрии: type(confidence_array)={type(confidence_array)}, shape={getattr(confidence_array, 'shape', None)}, size={getattr(confidence_array, 'size', None)}")
+                    logger.info(f"[DEBUG] Анализ асимметрии...")
+                    print(f"[DEBUG] Анализ асимметрии...")
                     left_indices  = [0, 1, 2, 3, 4, 5, 6, 7, 17, 18, 19, 20, 36, 37, 38, 39, 40, 41, 48, 49, 50, 51, 52, 53, 54]
                     right_indices = [16,15,14,13,12,11,10,9,26,25,24,23,45,44,43,42,47,46,54,53,52,51,50,49,48]
                     asymmetry = face_analyzer.analyze_facial_asymmetry(landmarks_3d, confidence_array)
+                    logger.info(f"[DEBUG] asymmetry: {asymmetry}")
+                    print(f"[DEBUG] asymmetry: {asymmetry}")
                     if not isinstance(asymmetry, dict) or not asymmetry:
                         logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось проанализировать асимметрию для {image_path}. Пропускаем.{Colors.RESET}")
+                        print(f"[DEBUG] Не удалось проанализировать асимметрию лица")
                         return {"path": image_path, "error": "Не удалось проанализировать асимметрию лица"}
                 except Exception as e:
                     logger.error(f"[DEBUG] Ошибка при анализе асимметрии: {e}")
+                    print(f"[DEBUG] Ошибка анализа асимметрии: {str(e)}")
                     return {"path": image_path, "error": f"Ошибка анализа асимметрии: {str(e)}"}
 
             # 8. Извлечение эмбеддинга лица (512D) и анализ эмбеддингов
+            logger.info(f"[DEBUG] Извлечение эмбеддинга лица...")
             embedding_analyzer = self.components['embedding_analyzer']
             emb, emb_conf = embedding_analyzer.extract_512d_face_embedding(img, embedding_analyzer.face_app)
+            logger.info(f"[DEBUG] emb: {type(emb)}, shape: {getattr(emb, 'shape', None)}, size: {getattr(emb, 'size', None)}; emb_conf: {emb_conf}")
+            print(f"[DEBUG] emb: {type(emb)}, shape: {getattr(emb, 'shape', None)}, size: {getattr(emb, 'size', None)}; emb_conf: {emb_conf}")
             if emb is None or emb_conf is None or not hasattr(emb, 'size') or emb.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось извлечь эмбеддинг для {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось извлечь эмбеддинг лица")
                 return {"path": image_path, "error": "Не удалось извлечь эмбеддинг лица"}
             if not isinstance(emb_conf, (float, int, np.floating)):
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Некорректный тип emb_conf для {image_path}: {emb_conf} ({type(emb_conf)}). Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Некорректный тип emb_conf: {emb_conf}")
                 return {"path": image_path, "error": "Некорректный тип уверенности эмбеддинга"}
             if emb_conf < 0.3:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкая уверенность эмбеддинга для {image_path} (confidence={emb_conf:.3f} < 0.3). Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Слишком низкая уверенность эмбеддинга: {emb_conf}")
                 return {"path": image_path, "error": f"Слишком низкая уверенность эмбеддинга: {emb_conf:.3f}"}
             emb_result = {
                 'embedding': emb.tolist(),
@@ -699,21 +739,31 @@ class FaceAuthenticitySystem:
             emb_result['ensemble_fusion'] = fusion
 
             # 9. Анализ текстуры кожи (LBP, Gabor, FFT, entropy, Level)
+            logger.info(f"[DEBUG] Анализ текстуры кожи...")
             texture_analyzer = self.components['texture_analyzer']
             texture_zones = texture_analyzer.analyze_skin_texture_by_zones(img, landmarks_3d)
+            logger.info(f"[DEBUG] texture_zones: {texture_zones}")
+            print(f"[DEBUG] texture_zones: {texture_zones}")
             if texture_zones is None or not isinstance(texture_zones, dict) or len(texture_zones) == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось проанализировать текстуру для {image_path}. Пропускаем.{Colors.RESET}")
+                print(f"[DEBUG] Не удалось проанализировать текстуру кожи")
                 return {"path": image_path, "error": "Не удалось проанализировать текстуру кожи"}
             material_score = texture_analyzer.calculate_material_authenticity_score(texture_zones)
             mask_level = texture_analyzer.classify_mask_technology_level(texture_zones, photo_date=item_date)
 
             # --- ДОБАВЛЯЮ РАСЧЁТ authenticity_score ---
             anomaly_detector = self.components['anomaly_detector']
-            # Для простого случая: используем средние значения, если нет отдельных score
             geometry_score = metrics.get('geometry_score', 1.0) if 'geometry_score' in metrics else 1.0
             embedding_score = float(emb_conf)
             texture_score = float(material_score)
             temporal_score = 1.0  # если нет временного анализа, ставим 1.0
+            print(f"DEBUG: geometry_score={geometry_score}, embedding_score={embedding_score}, texture_score={texture_score}, temporal_score={temporal_score}")
+            logger.info(f"[DEBUG] authenticity_score inputs: geometry={geometry_score}, embedding={embedding_score}, texture={texture_score}, temporal={temporal_score}")
+            # Проверка на nan/None
+            for name, val in zip(["geometry_score", "embedding_score", "texture_score", "temporal_score"], [geometry_score, embedding_score, texture_score, temporal_score]):
+                if val is None or (isinstance(val, float) and math.isnan(val)):
+                    print(f"ОШИБКА: {name} = {val} (None или nan)")
+                    logger.error(f"ОШИБКА: {name} = {val} (None или nan)")
             authenticity_score = anomaly_detector.calculate_identity_authenticity_score(
                 geometry=geometry_score,
                 embedding=embedding_score,
@@ -721,6 +771,8 @@ class FaceAuthenticitySystem:
                 temporal_consistency=temporal_score
             )
 
+            logger.info(f"[DEBUG] === КОНЕЦ анализа изображения: {image_path}")
+            print(f"[DEBUG] === КОНЕЦ анализа изображения: {image_path}")
             # Возвращаем расширенный результат с authenticity_score
             return dict(
                 path=image_path,
@@ -739,6 +791,7 @@ class FaceAuthenticitySystem:
             )
         except Exception as e:
             logger.error(f"{Colors.RED}ОШИБКА анализа изображения {image_path}: {e}{Colors.RESET}")
+            print(f"[DEBUG] ОШИБКА анализа изображения: {str(e)}")
             return {"path": image_path, "error": f"Внутренняя ошибка анализа: {str(e)}"}
 
     def _save_cli_results(self, results: Dict[str, Any], format: str) -> Path:
@@ -991,3 +1044,14 @@ class DataMissingWarning(UserWarning):
     pass
 
 warnings.filterwarnings('once')
+
+def log_and_print(level, msg):
+    print(f"[LOG][{level}] {msg}")
+    if level == 'info':
+        logger.info(msg)
+    elif level == 'error':
+        logger.error(msg)
+    elif level == 'warning':
+        logger.warning(msg)
+    else:
+        logger.debug(msg)

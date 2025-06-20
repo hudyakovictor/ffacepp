@@ -21,7 +21,7 @@ import cv2
 import asyncio
 
 # Получение логгера
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 # Импорт конфигурации
 try:
