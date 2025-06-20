@@ -5,24 +5,18 @@ UIComponents - UI компоненты для Gradio интерфейса
 Исправлены все критические ошибки согласно правкам
 """
 
+import os
+os.makedirs("logs", exist_ok=True)
 import gradio as gr
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator
 import json
 import logging
 from pathlib import Path
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/uicomponents.log'),
-        logging.StreamHandler()
-    ]
-)
+# Получение логгера через logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 # ==================== БАЗОВЫЙ КЛАСС ====================
@@ -365,109 +359,6 @@ class AdvancedFilters(BaseUIComponent):
         
         return col
 
-# ==================== SMART FILE UPLOADER ====================
-
-class SmartFileUploader(BaseUIComponent):
-    """
-    ИСПРАВЛЕНО: Умная загрузка файлов с валидацией
-    Согласно правкам: поддержка до 1500 файлов
-    """
-    
-    def __init__(self, max_files: int = 1500):
-        super().__init__("uploader")
-        self.max_files = max_files
-        self.uploaded_files = []
-    
-    def create_uploader(self) -> gr.Column:
-        """Создание интерфейса загрузки"""
-        with gr.Column() as col:
-            gr.Markdown(f"### 📁 Загрузка файлов (макс. {self.max_files})")
-            
-            self.file_upload = gr.File(
-                file_count="multiple",
-                file_types=[".jpg", ".jpeg", ".png"],
-                label=f"Загрузите изображения (макс. {self.max_files})"
-            )
-            
-            self.quality_filter = gr.Slider(
-                minimum=0.0,
-                maximum=1.0,
-                value=0.6,
-                label="Порог качества"
-            )
-            
-            self.preview_gallery = gr.Gallery(
-                label="Предварительный просмотр",
-                columns=5,
-                rows=2,
-                height=300
-            )
-            
-            self.upload_status = gr.Textbox(
-                label="Статус загрузки",
-                interactive=False
-            )
-        
-        return col
-    
-    def process_uploaded_files(self, files: List[str], quality_threshold: float) -> Tuple[List[str], str]:
-        """Обработка загруженных файлов"""
-        try:
-            if not files:
-                return [], "Файлы не выбраны"
-            
-            if len(files) > self.max_files:
-                return [], f"Превышен лимит: {len(files)} > {self.max_files}"
-            
-            valid_files = []
-            for file_path in files:
-                # Простая валидация
-                if Path(file_path).suffix.lower() in ['.jpg', '.jpeg', '.png']:
-                    valid_files.append(file_path)
-            
-            status = f"Обработано: {len(valid_files)}/{len(files)} файлов"
-            
-            return valid_files[:10], status  # Показываем первые 10 для preview
-            
-        except Exception as e:
-            logger.error(f"Ошибка обработки файлов: {e}")
-            return [], f"Ошибка: {str(e)}"
-
-# ==================== REAL TIME ANALYZER ====================
-
-class RealTimeAnalyzer(BaseUIComponent):
-    """
-    ИСПРАВЛЕНО: Анализатор в реальном времени
-    Согласно правкам: прогресс-трекинг и cancel операций
-    """
-    
-    def __init__(self):
-        super().__init__("analyzer")
-        self.is_running = False
-    
-    def create_analyzer(self) -> gr.Column:
-        """Создание интерфейса анализатора"""
-        with gr.Column() as col:
-            gr.Markdown("### ⚡ Анализ в реальном времени")
-            
-            with gr.Row():
-                self.start_btn = gr.Button("🚀 Начать", variant="primary")
-                self.pause_btn = gr.Button("⏸️ Пауза")
-                self.stop_btn = gr.Button("⏹️ Стоп", variant="stop")
-            
-            self.progress_bar = gr.Progress()
-            
-            self.current_file = gr.Textbox(
-                label="Текущий файл",
-                interactive=False
-            )
-            
-            self.live_metrics = gr.HTML(
-                label="Метрики в реальном времени"
-            )
-        
-        return col
-
 # ==================== INTERACTIVE COMPARISON ====================
 
 class InteractiveComparison(BaseUIComponent):
@@ -489,7 +380,7 @@ class InteractiveComparison(BaseUIComponent):
                 self.right_image = gr.Image(label="Изображение B")
             
             self.comparison_metrics = gr.DataFrame(
-                headers=["Метрика", "Значение A", "Значение B", "Разница"],
+                column_names=["Метрика", "Значение A", "Значение B", "Разница"],
                 label="Сравнение метрик"
             )
             
@@ -569,8 +460,6 @@ def create_ui_components() -> Dict[str, BaseUIComponent]:
         'temporal_slider': TemporalSlider(),
         'metrics_gallery': MetricsGallery(),
         'filters': AdvancedFilters(),
-        'uploader': SmartFileUploader(),
-        'analyzer': RealTimeAnalyzer(),
         'comparison': InteractiveComparison(),
         'search': AdvancedSearch(),
         'assistant': AIAssistant()

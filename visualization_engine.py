@@ -5,6 +5,8 @@ VisualizationEngine - Движок визуализации с интеракт�
 Исправлены все критические ошибки согласно правкам
 """
 
+import os
+os.makedirs("logs", exist_ok=True)
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,15 +20,7 @@ from datetime import datetime, timedelta
 import cv2
 import asyncio
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/visualizationengine.log'),
-        logging.StreamHandler()
-    ]
-)
+# Получение логгера
 logger = logging.getLogger(__name__)
 
 # Импорт конфигурации

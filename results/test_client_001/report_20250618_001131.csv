@@ -1,2 +1,0 @@
-client_id,overall_score,risk_level,recommendation,generation_date,system_version,geometry_3d_model_fit,embedding_cosine_similarity,texture_quality
-test_client_001,0.75,Низкий,Признаков подделки не обнаружено. Лицо признано подлинным.,2025-06-18 00:11:31,2.0,0.8,0.95,0.9

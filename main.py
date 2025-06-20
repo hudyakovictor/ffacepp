@@ -18,6 +18,26 @@ import traceback
 import json
 import numpy as np
 import warnings
+import uuid
+import psutil
+import time
+
+# === ГАРАНТИРОВАННОЕ СОЗДАНИЕ ПАПКИ ДЛЯ ЛОГОВ ===
+os.makedirs("logs", exist_ok=True)
+
+# === ДОБАВЛЕНО: ColoredFormatter для цветного логирования ===
+class ColoredFormatter(logging.Formatter):
+    FORMATS = {
+        logging.DEBUG: "\033[96m%(levelname)s:\033[0m %(message)s",
+        logging.INFO: "\033[92m%(levelname)s:\033[0m %(message)s",
+        logging.WARNING: "\033[93m%(levelname)s:\033[0m %(message)s",
+        logging.ERROR: "\033[91m%(levelname)s:\033[0m %(message)s",
+        logging.CRITICAL: "\033[91m\033[1m%(levelname)s:\033[0m %(message)s"
+    }
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
 
 # --- ЦВЕТА КОНСОЛИ ---
 class Colors:
@@ -31,20 +51,48 @@ class Colors:
     PURPLE = "\033[95m"
     WHITE = "\033[97m"
 
-# --- КАСТОМНЫЙ ФОРМАТТЕР ДЛЯ ЦВЕТНОГО ЛОГИРОВАНИЯ ---
-class ColoredFormatter(logging.Formatter):
-    FORMATS = {
-        logging.DEBUG: f"{Colors.CYAN}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.INFO: f"{Colors.GREEN}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.WARNING: f"{Colors.YELLOW}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.ERROR: f"{Colors.RED}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.CRITICAL: f"{Colors.RED}{Colors.BOLD}%(levelname)s:{Colors.RESET} %(message)s"
-    }
+# === ГЕНЕРАЦИЯ run_uuid ===
+RUN_UUID = str(uuid.uuid4())
 
+# === Кастомный JSONL-логгер ===
+class JSONLFormatter(logging.Formatter):
     def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
-        return formatter.format(record)
+        log_record = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "mod": record.module,
+            "func": record.funcName,
+            "msg": record.getMessage(),
+            "duration_ms": getattr(record, "duration_ms", None),
+            "mem_mb": psutil.Process().memory_info().rss // 1e6,
+            "run_uuid": RUN_UUID
+        }
+        return json.dumps(log_record, ensure_ascii=False)
+
+# Настройка логгера на JSONL
+logger = logging.getLogger()
+for h in logger.handlers:
+    logger.removeHandler(h)
+file_handler = logging.FileHandler(f"logs/session_{RUN_UUID}.jsonl", mode="a", encoding="utf-8")
+file_handler.setFormatter(JSONLFormatter())
+logger.addHandler(file_handler)
+logger.setLevel(logging.INFO)
+
+# Автоматическое повышение уровня логирования при ошибках
+class AutoDebugHandler(logging.Handler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.debug_counter = 0
+    def emit(self, record):
+        if record.levelno >= logging.ERROR:
+            logger.setLevel(logging.DEBUG)
+            self.debug_counter = 20
+        elif self.debug_counter > 0:
+            self.debug_counter -= 1
+            if self.debug_counter == 0:
+                logger.setLevel(logging.INFO)
+
+logger.addHandler(AutoDebugHandler())
 
 # Настройка логирования
 log_file_handler = logging.FileHandler('logs/main.log')
@@ -62,6 +110,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+print("DEBUG: Импортирую все модули...")
 # ИСПРАВЛЕНО: Импорт всех модулей с ОРИГИНАЛЬНЫМИ названиями
 try:
     from core_config import (
@@ -71,22 +120,35 @@ try:
         MAX_FILE_UPLOAD_COUNT, ERROR_CODES, SYSTEM_VERSION,
         AUTHENTICITY_WEIGHTS, CRITICAL_THRESHOLDS, MIN_VISIBILITY_Z
     )
+    print("DEBUG: Импортирован core_config")
     from face_3d_analyzer import Face3DAnalyzer, initialize_3ddfa_components
+    print("DEBUG: Импортирован face_3d_analyzer")
     from embedding_analyzer import EmbeddingAnalyzer
+    print("DEBUG: Импортирован embedding_analyzer")
     from texture_analyzer import TextureAnalyzer
+    print("DEBUG: Импортирован texture_analyzer")
     from temporal_analyzer import TemporalAnalyzer
+    print("DEBUG: Импортирован temporal_analyzer")
     from anomaly_detector import AnomalyDetector
+    print("DEBUG: Импортирован anomaly_detector")
     from medical_validator import MedicalValidator
+    print("DEBUG: Импортирован medical_validator")
     from data_manager import DataManager
+    print("DEBUG: Импортирован data_manager")
     from metrics_calculator import MetricsCalculator
+    print("DEBUG: Импортирован metrics_calculator")
     from data_processing import DataProcessor, ResultsAggregator, AnalysisResult
+    print("DEBUG: Импортирован data_processing")
     from gradio_interface import GradioInterface, create_modular_interface
+    print("DEBUG: Импортирован gradio_interface")
     from visualization_engine import VisualizationEngine
+    print("DEBUG: Импортирован visualization_engine")
     from report_generator import ReportGenerator
-    logger.info("Все модули системы успешно импортированы с оригинальными названиями")
+    print("DEBUG: Импортирован report_generator")
+    print("DEBUG: Все модули системы успешно импортированы с оригинальными названиями")
 except ImportError as e:
-    logger.error(f"Критическая ошибка импорта модулей: {e}")
-    print(f"ОШИБКА: Не удалось импортировать модули системы: {e}")
+    print(f"CRITICAL ERROR: Не удалось импортировать модули системы: {e}")
+    print(traceback.format_exc())
     sys.exit(1)
 
 # ==================== КОНСТАНТЫ СИСТЕМЫ ====================
@@ -218,9 +280,11 @@ class FaceAuthenticitySystem:
             
             # 17. ИСПРАВЛЕНО: gradio_interface (последним)
             logger.info("Инициализация 'Интерфейса Gradio' (gradio_interface)...")
+            print("=== gradio_interface импортирован ===")
             self.components['gradio_interface'] = create_modular_interface(
                 all_system_components=self.components
             )
+            print("=== интерфейс создан ===")
             
             logger.info(f"\n{Colors.CYAN}### Шаг 2: Загрузка кэшей системы...{Colors.RESET}")
             # Загрузка кэшей
@@ -545,7 +609,7 @@ class FaceAuthenticitySystem:
             img = cv2.imread(image_path)
             if img is None:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось загрузить изображение {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Не удалось загрузить изображение"}
+                return {"path": image_path, "error": "Не удалось загрузить изображение (файл повреждён или не поддерживается)"}
 
             # 1. Валидация качества изображения
             quality_results = data_manager.validate_image_quality_for_analysis(img)
@@ -553,50 +617,50 @@ class FaceAuthenticitySystem:
                 return {"path": image_path, "error": "Ошибка валидации качества изображения"}
             if quality_results.get('quality_score', 0) < CRITICAL_THRESHOLDS["min_quality_score"]:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкое качество изображения {image_path} (score: {quality_results.get('quality_score', 0):.2f}).{Colors.RESET}")
-                return {"path": image_path, "quality_issues": quality_results.get("issues", []), "quality_score": quality_results.get("quality_score", 0), "error": "Низкое качество изображения"}
+                return {"path": image_path, "quality_issues": quality_results.get("issues", []), "quality_score": quality_results.get("quality_score", 0), "error": "Слишком низкое качество изображения для анализа"}
 
             # 2. Извлечение 68 ландмарок
             landmarks_3d, confidence_array, param = face_analyzer.extract_68_landmarks_with_confidence(img, models={'tddfa': face_analyzer.tddfa, 'face_boxes': face_analyzer.faceboxes})
             if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Лицо не обнаружено на изображении {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Лицо не обнаружено"}
+                return {"path": image_path, "error": "Лицо не обнаружено на изображении. Попробуйте другое фото с чётким лицом."}
             if confidence_array is None or not hasattr(confidence_array, 'size') or confidence_array.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Confidence array пустой для {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Confidence array пустой"}
+                return {"path": image_path, "error": "Ошибка извлечения ландмарок лица (confidence пустой)"}
             if param is None or not hasattr(param, 'size') or param.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Параметры модели пустые для {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Параметры модели пустые"}
+                return {"path": image_path, "error": "Ошибка извлечения параметров модели лица"}
 
             # 3. Определение позы
             pose_analysis = face_analyzer.determine_precise_face_pose(landmarks_3d, param, confidence_array)
             if pose_analysis is None or not isinstance(pose_analysis, dict):
-                return {"path": image_path, "error": "Ошибка определения позы"}
+                return {"path": image_path, "error": "Ошибка определения позы лица"}
             pose_category = pose_analysis.get("pose_category", "Unknown")
             if pose_category == "Unknown" or pose_category == "Error":
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось определить позу для {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Не удалось определить позу"}
+                return {"path": image_path, "error": "Не удалось определить позу лица"}
 
             # 4. Нормализация ландмарок
             vis = landmarks_3d[:,2] > MIN_VISIBILITY_Z
             norm_landmarks = face_analyzer.normalize_landmarks_by_pose_category(landmarks_3d, pose_category, vis)
             if norm_landmarks is None or not hasattr(norm_landmarks, 'size') or norm_landmarks.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось нормализовать ландмарки для {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Не удалось нормализовать ландмарки"}
+                return {"path": image_path, "error": "Не удалось нормализовать ландмарки лица"}
 
             # 5. Расчет метрик идентичности
             metrics = face_analyzer.calculate_identity_signature_metrics(norm_landmarks, pose_category)
             if metrics is None or not isinstance(metrics, dict) or len(metrics) == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось рассчитать метрики для {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Не удалось рассчитать метрики"}
+                return {"path": image_path, "error": "Не удалось рассчитать метрики идентичности"}
 
             # 6. Проверка shape error (если используется)
             if hasattr(face_analyzer, 'calculate_comprehensive_shape_error'):
                 try:
                     shape_error = face_analyzer.calculate_comprehensive_shape_error(norm_landmarks)
                     if shape_error is None or not isinstance(shape_error, dict):
-                        return {"path": image_path, "error": "Ошибка shape error"}
+                        return {"path": image_path, "error": "Ошибка расчёта shape error"}
                 except Exception as e:
-                    return {"path": image_path, "error": f"Ошибка shape error: {e}"}
+                    return {"path": image_path, "error": f"Ошибка shape error: {str(e)}"}
 
             # 7. Проверка асимметрии (если используется)
             if hasattr(face_analyzer, 'analyze_facial_asymmetry'):
@@ -608,23 +672,23 @@ class FaceAuthenticitySystem:
                     asymmetry = face_analyzer.analyze_facial_asymmetry(landmarks_3d, confidence_array)
                     if not isinstance(asymmetry, dict) or not asymmetry:
                         logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось проанализировать асимметрию для {image_path}. Пропускаем.{Colors.RESET}")
-                        return {"path": image_path, "error": "Ошибка анализа асимметрии"}
+                        return {"path": image_path, "error": "Не удалось проанализировать асимметрию лица"}
                 except Exception as e:
                     logger.error(f"[DEBUG] Ошибка при анализе асимметрии: {e}")
-                    return {"path": image_path, "error": f"Ошибка анализа асимметрии: {e}"}
+                    return {"path": image_path, "error": f"Ошибка анализа асимметрии: {str(e)}"}
 
             # 8. Извлечение эмбеддинга лица (512D) и анализ эмбеддингов
             embedding_analyzer = self.components['embedding_analyzer']
             emb, emb_conf = embedding_analyzer.extract_512d_face_embedding(img, embedding_analyzer.face_app)
             if emb is None or emb_conf is None or not hasattr(emb, 'size') or emb.size == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось извлечь эмбеддинг для {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Не удалось извлечь эмбеддинг"}
+                return {"path": image_path, "error": "Не удалось извлечь эмбеддинг лица"}
             if not isinstance(emb_conf, (float, int, np.floating)):
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Некорректный тип emb_conf для {image_path}: {emb_conf} ({type(emb_conf)}). Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Некорректный тип emb_conf"}
+                return {"path": image_path, "error": "Некорректный тип уверенности эмбеддинга"}
             if emb_conf < 0.3:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Низкая уверенность эмбеддинга для {image_path} (confidence={emb_conf:.3f} < 0.3). Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": f"Низкая уверенность эмбеддинга: {emb_conf:.3f}"}
+                return {"path": image_path, "error": f"Слишком низкая уверенность эмбеддинга: {emb_conf:.3f}"}
             emb_result = {
                 'embedding': emb.tolist(),
                 'extraction_confidence': float(emb_conf)
@@ -639,7 +703,7 @@ class FaceAuthenticitySystem:
             texture_zones = texture_analyzer.analyze_skin_texture_by_zones(img, landmarks_3d)
             if texture_zones is None or not isinstance(texture_zones, dict) or len(texture_zones) == 0:
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Не удалось проанализировать текстуру для {image_path}. Пропускаем.{Colors.RESET}")
-                return {"path": image_path, "error": "Не удалось проанализировать текстуру"}
+                return {"path": image_path, "error": "Не удалось проанализировать текстуру кожи"}
             material_score = texture_analyzer.calculate_material_authenticity_score(texture_zones)
             mask_level = texture_analyzer.classify_mask_technology_level(texture_zones, photo_date=item_date)
 
@@ -675,7 +739,7 @@ class FaceAuthenticitySystem:
             )
         except Exception as e:
             logger.error(f"{Colors.RED}ОШИБКА анализа изображения {image_path}: {e}{Colors.RESET}")
-            return {"path": image_path, "error": str(e)}
+            return {"path": image_path, "error": f"Внутренняя ошибка анализа: {str(e)}"}
 
     def _save_cli_results(self, results: Dict[str, Any], format: str) -> Path:
         """Сохранение результатов CLI"""
@@ -840,11 +904,12 @@ def setup_signal_handlers(system: FaceAuthenticitySystem) -> None:
 def main():
     """Главная функция запуска"""
     try:
-        print(f"\n{Colors.BOLD}{Colors.BLUE}{'='*70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.BLUE}{SYSTEM_NAME} v{SYSTEM_VERSION}{Colors.RESET}")
-        print(f"{Colors.BLUE}Автор: {AUTHOR}{Colors.RESET}")
-        print(f"{Colors.BLUE}Дата сборки: {BUILD_DATE}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.BLUE}{'='*70}{Colors.RESET}\n")
+        print("=== main.py стартовал, логгер должен быть настроен ===")
+        print(f"\n{'='*70}")
+        print(f"Система анализа подлинности 3D лиц v{SYSTEM_VERSION}")
+        print(f"Автор: {AUTHOR}")
+        print(f"Дата сборки: {BUILD_DATE}")
+        print(f"{'='*70}\n")
         
         # Парсинг аргументов
         logger.info(f"{Colors.CYAN}### Обработка аргументов запуска...{Colors.RESET}")
@@ -859,13 +924,9 @@ def main():
             logging.getLogger().setLevel(logging.INFO)
             logger.info("Отладочный режим выключен. Вывод будет кратким.")
         
-        # Создание системы
-        logger.info(f"\n{Colors.CYAN}### Инициализация основной системы...{Colors.RESET}")
-        # Передаем run_self_tests=False для GUI режима
-        if args.mode == "gui":
-            system = FaceAuthenticitySystem(run_self_tests=False)
-        else:
-            system = FaceAuthenticitySystem(run_self_tests=True) # Для других режимов тесты запускаем
+        # ИНИЦИАЛИЗАЦИЯ СИСТЕМЫ ОДИНАКОВАЯ ДЛЯ ВСЕХ РЕЖИМОВ
+        system = FaceAuthenticitySystem(run_self_tests=(args.mode != "gui"))
+        print("DEBUG: Система инициализирована. Компоненты:", list(system.components.keys()))
         
         # Настройка обработчиков сигналов
         setup_signal_handlers(system)
@@ -878,21 +939,26 @@ def main():
                 share=args.share,
                 debug=args.debug
             )
-            
+        
         elif args.mode == "cli":
             if not args.images:
                 logger.critical(f"{Colors.RED}ОШИБКА: Для режима CLI необходимо указать пути к изображениям с помощью флага --images.{Colors.RESET}")
+                print(f"ОШИБКА: Для режима CLI необходимо указать пути к изображениям с помощью флага --images.")
                 sys.exit(1)
-            
-            results = system.run_cli_mode(args.images, args.output_format)
-            
-            print(f"\n{Colors.BOLD}{Colors.GREEN}Итоговый отчет CLI анализа:{Colors.RESET}")
-            print(f"  {Colors.WHITE}Всего файлов обработано:{Colors.RESET} {results['summary']['total_files']}")
-            print(f"  {Colors.GREEN}Успешно проанализировано:{Colors.RESET} {results['summary']['successful_analyses']}")
-            print(f"  {Colors.RED}Ошибок при анализе:{Colors.RESET} {results['summary']['failed_analyses']}")
-            print(f"  {Colors.CYAN}Средний балл аутентичности:{Colors.RESET} {results['summary']['average_authenticity']:.3f}")
-            print(f"  {Colors.BLUE}Файл с результатами:{Colors.RESET} {results['output_file']}")
-            
+            try:
+                results = system.run_cli_mode(args.images, args.output_format)
+                print(f"\n{Colors.BOLD}{Colors.GREEN}Итоговый отчет CLI анализа:{Colors.RESET}")
+                print(f"  {Colors.WHITE}Всего файлов обработано:{Colors.RESET} {results['summary'].get('total_files', 0)}")
+                print(f"  {Colors.GREEN}Успешно проанализировано:{Colors.RESET} {results['summary'].get('successful_analyses', 0)}")
+                print(f"  {Colors.RED}Ошибок при анализе:{Colors.RESET} {results['summary'].get('failed_analyses', 0)}")
+                print(f"  {Colors.CYAN}Средний балл аутентичности:{Colors.RESET} {results['summary'].get('average_authenticity', 0.0):.3f}")
+                print(f"  {Colors.BLUE}Файл с результатами:{Colors.RESET} {results.get('output_file', '')}")
+                logger.info(f"CLI анализ завершён. Итоговый файл: {results.get('output_file', '')}")
+            except Exception as e:
+                logger.critical(f"{Colors.RED}КРИТИЧЕСКАЯ ОШИБКА в CLI режиме: {e}{Colors.RESET}")
+                print(f"КРИТИЧЕСКАЯ ОШИБКА в CLI режиме: {e}")
+                sys.exit(1)
+        
         elif args.mode == "test":
             logger.info(f"\n{Colors.CYAN}### Запуск системы в ТЕСТОВОМ режиме...{Colors.RESET}")
             status = system.get_system_status()
@@ -902,9 +968,10 @@ def main():
             print(f"  {Colors.WHITE}Количество компонентов:{Colors.RESET} {status['components_count']}")
             print(f"  {Colors.WHITE}Версия системы:{Colors.RESET} {status['system_version']}")
             print(f"  {Colors.WHITE}Время непрерывной работы:{Colors.RESET} {status['session_stats']['uptime_seconds']:.2f} сек.")
-            
+            logger.info(f"Тестовый режим: статус системы выведен.")
         else:
             logger.critical(f"{Colors.RED}ОШИБКА: Неподдерживаемый режим работы: {args.mode}{Colors.RESET}")
+            print(f"ОШИБКА: Неподдерживаемый режим работы: {args.mode}")
             sys.exit(1)
             
     except KeyboardInterrupt:
@@ -913,6 +980,8 @@ def main():
     except Exception as e:
         logger.critical(f"{Colors.RED}КРИТИЧЕСКАЯ ОШИБКА, приложение будет закрыто: {e}{Colors.RESET}")
         logger.debug(f"Трассировка ошибки: {traceback.format_exc()}")
+        print("CRITICAL ERROR:", e)
+        print(traceback.format_exc())
         sys.exit(1)
 
 if __name__ == "__main__":

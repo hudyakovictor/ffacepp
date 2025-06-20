@@ -222,23 +222,18 @@ class DataProcessor:
         """
         try:
             logger.debug(f"Начинаем обработку файла: {filepath}")
-            
             # Проверка кэша
             cache_key = self.get_cache_key(filepath)
             if cache_key in self.results_cache:
                 self.processing_stats["cache_hits"] += 1
                 logger.debug(f"Результат для {filepath} найден в кэше. Пропускаем анализ.")
                 return self.results_cache[cache_key]
-            
             self.processing_stats["cache_misses"] += 1
             logger.debug(f"Результат для {filepath} не найден в кэше. Выполняем полный анализ.")
-            
             # Загрузка изображения (уже гарантирует np.ndarray)
             image = await self.load_image_async(filepath)
-            
             # Валидация качества изображения
             quality_result = self.data_manager.validate_image_quality_for_analysis(image)
-            
             if quality_result.get("quality_score", 0) < CRITICAL_THRESHOLDS.get("min_quality_score", 0.6):
                 logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Файл '{filepath}' имеет низкое качество ({quality_result.get('quality_score', 0):.2f}). Будет отмечен как аномалия.{Colors.RESET}")
                 return AnalysisResult(
@@ -249,12 +244,9 @@ class DataProcessor:
                     metrics={},
                     metadata={"error": "Низкое качество изображения", "quality_score": quality_result.get("quality_score", 0)}
                 )
-            
             # Асинхронный анализ 3D лица
             analysis_3d_result = await self.analyze_3d_async(image)
-
             landmarks68 = analysis_3d_result.get("landmarks68")
-
             # Проверка, что landmarks68 не None перед вызовом analyze_embedding_async
             if landmarks68 is None or not hasattr(landmarks68, 'size') or landmarks68.size == 0:
                 logger.warning(f"[DataProcessor] Ландмарки не найдены для файла {filepath}. Пропускаем анализ эмбеддингов.")
@@ -266,10 +258,9 @@ class DataProcessor:
                     landmarks=landmarks68,
                     insight_app=self.embedding_analyzer.face_app # Передача экземпляра insight_app
                 )
-
             # Анализ текстуры
             texture_result = {}
-            if landmarks68.size == 0 or landmarks68 is None:
+            if landmarks68 is None or landmarks68.size == 0:
                 logger.warning(f"[DataProcessor] Ландмарки не найдены для файла {filepath}. Пропускаем анализ текстуры.")
                 texture_result = {"error": "No landmarks for texture analysis"}
             else:
@@ -277,29 +268,27 @@ class DataProcessor:
                     image=image,
                     landmarks=landmarks68
                 )
-
             analysis_results = {
                 "3d_analysis": analysis_3d_result,
                 "embedding": embedding_result,
                 "texture": texture_result
             }
-            
             # Агрегация результатов и кэширование
             final_result = self.aggregate_analysis_results(filepath, analysis_results, quality_result)
             self._cache_result(cache_key, final_result)
-            
             logger.debug(f"Завершено обработка файла: {filepath}")
             return final_result
-            
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при обработке файла {filepath}: {e}{Colors.RESET}")
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"{Colors.RED}ОШИБКА при обработке файла {filepath}: {e}{Colors.RESET}\n{tb}")
             return AnalysisResult(
                 filepath=filepath,
                 timestamp=datetime.now().isoformat(),
                 authenticity_score=0.0,
-                anomalies={"processing_error": str(e)},
+                anomalies={"processing_error": "Внутренняя ошибка анализа файла. Возможно, не удалось найти лицо или файл повреждён."},
                 metrics={},
-                metadata={"error": str(e)}
+                metadata={"error": str(e), "traceback": tb}
             )
 
     async def load_image_async(self, filepath: str) -> Optional[np.ndarray]:
@@ -672,31 +661,64 @@ class ResultsAggregator:
         """Получение статистики результатов"""
         if not self.results_db:
             logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Нет результатов для расчета статистики.{Colors.RESET}")
-            return {}
-        
-        try:
-            authenticity_scores = [r.authenticity_score for r in self.results_db]
-            
-            stats = {
-                "total_files": len(self.results_db),
-                "successful_analyses": sum(1 for r in self.results_db if not r.anomalies.get("processing_error") and r.authenticity_score > 0),
-                "failed_analyses": sum(1 for r in self.results_db if r.anomalies.get("processing_error") or r.authenticity_score == 0),
-                "average_authenticity": float(np.mean(authenticity_scores)) if authenticity_scores else 0.0,
-                "std_authenticity": float(np.std(authenticity_scores)) if authenticity_scores else 0.0,
-                "min_authenticity": float(np.min(authenticity_scores)) if authenticity_scores else 0.0,
-                "max_authenticity": float(np.max(authenticity_scores)) if authenticity_scores else 0.0,
-                "anomalies_count": len([r for r in self.results_db if r.anomalies and not r.anomalies.get("processing_error")]),
-                "processing_dates": {
-                    "first": min(r.timestamp for r in self.results_db),
-                    "last": max(r.timestamp for r in self.results_db)
-                }
+            return {
+                "total_files": 0,
+                "successful_analyses": 0,
+                "failed_analyses": 0,
+                "average_authenticity": 0.0,
+                "std_authenticity": 0.0,
+                "min_authenticity": 0.0,
+                "max_authenticity": 0.0,
+                "anomalies_count": 0,
+                "processing_dates": {"first": None, "last": None}
             }
-            logger.info(f"{Colors.GREEN}✔ Статистика агрегации результатов рассчитана.{Colors.RESET}")
+        try:
+            total_files = len(self.results_db)
+            successful = 0
+            failed = 0
+            authenticity_scores = []
+            for r in self.results_db:
+                # Если есть ошибка или authenticity_score == 0 или None — считаем ошибкой
+                if r.anomalies.get("processing_error") or r.authenticity_score is None or r.authenticity_score == 0:
+                    failed += 1
+                else:
+                    successful += 1
+                    authenticity_scores.append(r.authenticity_score)
+            avg_auth = float(np.mean(authenticity_scores)) if authenticity_scores else 0.0
+            std_auth = float(np.std(authenticity_scores)) if authenticity_scores else 0.0
+            min_auth = float(np.min(authenticity_scores)) if authenticity_scores else 0.0
+            max_auth = float(np.max(authenticity_scores)) if authenticity_scores else 0.0
+            anomalies_count = len([r for r in self.results_db if r.anomalies and not r.anomalies.get("processing_error")])
+            processing_dates = {
+                "first": min(r.timestamp for r in self.results_db) if self.results_db else None,
+                "last": max(r.timestamp for r in self.results_db) if self.results_db else None
+            }
+            stats = {
+                "total_files": total_files,
+                "successful_analyses": successful,
+                "failed_analyses": failed,
+                "average_authenticity": avg_auth,
+                "std_authenticity": std_auth,
+                "min_authenticity": min_auth,
+                "max_authenticity": max_auth,
+                "anomalies_count": anomalies_count,
+                "processing_dates": processing_dates
+            }
+            logger.info(f"{Colors.GREEN}✔ Итоговая статистика: {stats}{Colors.RESET}")
             return stats
-            
         except Exception as e:
             logger.error(f"{Colors.RED}ОШИБКА при расчете статистики агрегированных результатов: {e}{Colors.RESET}")
-            return {}
+            return {
+                "total_files": len(self.results_db),
+                "successful_analyses": 0,
+                "failed_analyses": len(self.results_db),
+                "average_authenticity": 0.0,
+                "std_authenticity": 0.0,
+                "min_authenticity": 0.0,
+                "max_authenticity": 0.0,
+                "anomalies_count": 0,
+                "processing_dates": {"first": None, "last": None}
+            }
 
     def filter_results(self, authenticity_range: Tuple[float, float] = (0.0, 1.0),
                       has_anomalies: Optional[bool] = None,

@@ -5,6 +5,8 @@ GradioInterface - Интерфейс Gradio с модульной архитек
 Исправлены все критические ошибки согласно правкам
 """
 
+import os
+os.makedirs("logs", exist_ok=True)
 import gradio as gr
 import numpy as np
 import pandas as pd
@@ -12,7 +14,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import logging
-from typing import Dict, List, Optional, Any, Callable, Tuple, Union
+from typing import Dict, List, Optional, Any, Callable, Tuple, Union, AsyncGenerator
 from pathlib import Path
 import json
 import pickle
@@ -20,16 +22,9 @@ import asyncio
 from datetime import datetime, timedelta
 import cv2
 import os
+from PIL import Image
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/gradiointerface.log'),
-        logging.StreamHandler()
-    ]
-)
+# Удаляю настройку логгера (logging.basicConfig и создание хендлеров) из этого файла, оставляю только получение логгера через logging.getLogger(__name__).
 logger = logging.getLogger(__name__)
 
 # Импорт компонентов системы
@@ -122,11 +117,34 @@ class SmartFileUploader:
         
         return col
 
-    def process_uploaded_files(self, files: List[str], quality_threshold: float) -> Tuple[str, List[str]]:
-        """
-        ИСПРАВЛЕНО: Обработка загруженных файлов с валидацией качества
-        Согласно правкам: проверка качества и E002 для низкого качества
-        """
+    def process_uploaded_files(self, files: List[str], quality_threshold: float) -> Tuple[str, List[Any]]:
+        print("=== process_uploaded_files вызван (реальные фото) ===")
+        logger.info(f"[DEBUG] process_uploaded_files вызван, files: {files}, quality_threshold: {quality_threshold}")
+        from PIL import Image
+        import os
+
+        if not files:
+            self.uploaded_files = []
+            return "Файлы не выбраны", []
+
+        valid_files = []
+        preview_images = []
+        for file_path in files:
+            try:
+                if not os.path.exists(file_path):
+                    continue
+                img = Image.open(file_path)
+                preview_images.append(img)
+                valid_files.append(file_path)
+            except Exception as e:
+                logger.error(f"Ошибка открытия файла {file_path}: {e}")
+
+        self.uploaded_files = valid_files
+
+        status = f"Загружено: {len(valid_files)} из {len(files)} файлов"
+        return status, preview_images
+
+    def _process_uploaded_files_impl(self, files: List[str], quality_threshold: float) -> Tuple[str, List[str]]:
         if not files:
             return "Файлы не выбраны", []
         
@@ -270,79 +288,76 @@ class RealTimeAnalyzer:
         
         return col
 
-    async def start_analysis(self, progress: gr.Progress) -> Tuple[str, str, go.Figure]:
-        """Запуск анализа"""
-        if self.is_running:
-            yield "Анализ уже запущен", "", go.Figure()
-            return
-
-        self.is_running = True
-        self.cancel_requested = False
-        logger.info("Запуск анализа в реальном времени")
-
+    async def start_analysis(self, progress: gr.Progress) -> AsyncGenerator[Tuple[str, str, go.Figure], None]:
+        print("=== start_analysis вызван ===")
+        logger.info("[DEBUG] start_analysis вызван")
         files_to_process = self.smart_file_uploader.uploaded_files
+        print(f"[DEBUG] self.smart_file_uploader.uploaded_files: {files_to_process}")
+        logger.info(f"[DEBUG] self.smart_file_uploader.uploaded_files: {files_to_process}")
+        # Явный yield в самом начале для сброса состояния интерфейса
+        yield "Ожидание анализа...", "<div style='color: gray;'>Ожидание анализа...</div>", go.Figure()
         if not files_to_process:
+            print("[DEBUG] Нет файлов для анализа")
+            logger.info("[DEBUG] Нет файлов для анализа")
             self.is_running = False
             yield "Нет файлов для анализа.", "<div style='color: red;'>❌ Нет файлов для анализа.</div>", go.Figure()
             return
 
         total_files = len(files_to_process)
         authenticity_scores_history = []
-
-        # Создание пустого графика
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=[], y=[], mode='lines', name='Аутентичность'))
         fig.update_layout(title="Динамика баллов аутентичности", xaxis_title="Файл", yaxis_title="Балл")
 
+        any_success = False
         try:
-            yield "Анализ запущен...", "<div style='color: orange;'>⏳ Анализ в процессе...</div>", fig # No progress object here
-            
-            with gr.Progress(track_tqdm=True) as progress: # Используем как контекстный менеджер
-                processed_count = 0
-                for i, file_path in enumerate(files_to_process):
-                    if self.cancel_requested:
-                        break
-
-                    current_file = f"Обработка: {os.path.basename(file_path)}"
-                    logger.info(current_file)
-
-                    # Асинхронная обработка одного файла (ждем завершения)
+            yield "Анализ запущен...", "<div style='color: orange;'>⏳ Анализ в процессе...</div>", fig
+            for i, file_path in enumerate(files_to_process):
+                try:
+                    print(f"[DEBUG] Анализирую файл: {file_path}")
+                    logger.info(f"[DEBUG] Анализирую файл: {file_path}")
                     analysis_result = await self.data_processor.process_single_file_async(file_path)
-                    
-                    processed_count += 1
-                    # Обновление прогресс-бара через переданный объект progress
-                    progress(processed_count / total_files, desc=f"Обработано {processed_count}/{total_files} файлов")
+                    print(f"[DEBUG] Результат анализа: {analysis_result}")
+                    logger.info(f"[DEBUG] Результат анализа: {analysis_result}")
 
-                    # Обновление метрик и графика
-                    if analysis_result.authenticity_score is not None:
-                        authenticity_scores_history.append(analysis_result.authenticity_score)
-                        
+                    # Новый блок: обработка ошибок анализа
+                    error_msg = ""
+                    if hasattr(analysis_result, "anomalies") and analysis_result.anomalies:
+                        error_msg = analysis_result.anomalies.get("processing_error") or ""
+                    if hasattr(analysis_result, "metadata") and "error" in analysis_result.metadata:
+                        error_msg = analysis_result.metadata["error"]
+
+                    if error_msg:
+                        status = f"Ошибка файла {os.path.basename(file_path)}: {error_msg}"
+                        live_metrics = f"<div style='color: red;'>Ошибка: {error_msg}</div>"
+                        yield status, live_metrics, fig
+                        continue  # Переходим к следующему файлу
+                    else:
+                        score = getattr(analysis_result, 'authenticity_score', 0.0)
+                        authenticity_scores_history.append(score)
                         # Обновление графика
                         fig.data[0].x = list(range(len(authenticity_scores_history)))
                         fig.data[0].y = authenticity_scores_history
-
-                        live_metrics = f"<div style='color: blue;'>✅ Текущий балл: {analysis_result.authenticity_score:.3f}</div>"
-                        yield current_file, live_metrics, fig # No progress object here
-                    else:
-                        live_metrics = f"<div style='color: red;'>❌ Ошибка анализа файла.</div>"
-                        yield current_file, live_metrics, fig # No progress object here
-
-        except Exception as e:
-            logger.error(f"Ошибка в RealTimeAnalyzer.start_analysis: {e}")
-            yield f"Ошибка: {str(e)}", "<div style='color: red;'>❌ Критическая ошибка анализа.</div>", go.Figure()
-            return
-        finally:
+                        status = f"Обработан файл {i+1}/{total_files}: {os.path.basename(file_path)}"
+                        live_metrics = f"<div style='color: blue;'>✅ Score: {score:.3f}</div>"
+                        yield status, live_metrics, fig
+                        any_success = True
+                except Exception as e:
+                    import traceback
+                    tb = traceback.format_exc()
+                    logger.error(f"Ошибка анализа файла {file_path}: {e}\n{tb}")
+                    print(f"=== ОШИБКА анализа файла {file_path} ===\n{tb}")
+                    yield f"Ошибка файла {os.path.basename(file_path)}", f"<div style='color: red;'>Ошибка: {e}<br><pre>{tb}</pre></div>", fig
             self.is_running = False
-            if self.cancel_requested:
-                final_status = "Анализ отменен."
-                final_metrics = "<div style='color: orange;'>⏸️ Анализ остановлен.</div>"
+            # Явный yield в самом конце, чтобы Gradio всегда обновлял интерфейс
+            if any_success:
+                yield "Анализ завершён.", "<div style='color: green;'>✔ Анализ завершён!</div>", fig
             else:
-                final_status = "Анализ завершен."
-                final_metrics = "<div style='color: green;'>✔ Анализ завершен!</div>"
-            
-            # Отправляем финальное обновление, прогресс должен быть 1.0
-            # progress(1.0, desc="Завершено") # Удаляем эту строку, так как контекстный менеджер завершит прогресс
-            yield final_status, final_metrics, fig
+                yield "Анализ завершён. Все файлы с ошибками.", "<div style='color: red;'>❌ Все файлы с ошибками. Проверьте фото и попробуйте снова.</div>", fig
+        except Exception as e:
+            logger.error(f"Ошибка в start_analysis: {e}")
+            yield f"Ошибка анализа: {e}", f"<div style='color: red;'>❌ Критическая ошибка анализа.</div>", go.Figure()
+            self.is_running = False
 
     def stop_analysis(self) -> Tuple[str, str, go.Figure]:
         """Остановка анализа"""
@@ -682,8 +697,7 @@ class MetricsDashboard:
             with gr.Row():
                 # Общая статистика
                 self.stats_summary = gr.JSON(
-                    label="Общая статистика",
-                    height=300
+                    label="Общая статистика"
                 )
                 
                 # Percentile ranks
@@ -816,14 +830,12 @@ class MaskDetectionDashboard:
             # Детальная статистика
             with gr.Row():
                 self.detection_stats = gr.JSON(
-                    label="Статистика обнаружения",
-                    height=200
+                    label="Статистика обнаружения"
                 )
                 
                 self.breakthrough_years = gr.JSON(
                     label="Breakthrough Years",
-                    value={"years": [2008, 2014, 2019, 2022], "description": "Годы технологических прорывов"},
-                    height=200
+                    value={"years": [2008, 2014, 2019, 2022], "description": "Годы технологических прорывов"}
                 )
         
         return col
@@ -895,6 +907,20 @@ class GradioInterface:
     def __init__(self, all_system_components: Dict[str, Any]):
         """Инициализация главного интерфейса"""
         logger.info("Инициализация GradioInterface")
+
+        # Проверка наличия всех обязательных компонентов
+        required_keys = [
+            'data_processor', 'results_aggregator', 'visualization_engine',
+            'face_3d_analyzer', 'embedding_analyzer', 'texture_analyzer',
+            'temporal_analyzer', 'anomaly_detector', 'medical_validator',
+            'data_manager', 'metrics_calculator'
+        ]
+        for key in required_keys:
+            if key not in all_system_components or all_system_components[key] is None:
+                print(f"[CRITICAL] Не найден компонент '{key}' в all_system_components!")
+                logger.critical(f"Не найден компонент '{key}' в all_system_components!")
+                raise RuntimeError(f"Не найден компонент '{key}' в all_system_components!")
+
         self.data_processor = all_system_components['data_processor']
         self.results_aggregator = all_system_components['results_aggregator']
         self.visualization_engine = all_system_components['visualization_engine']
@@ -942,6 +968,8 @@ class GradioInterface:
         logger.info("GradioInterface полностью инициализирован")
 
     def create_interface(self) -> gr.Blocks:
+        print("=== [DEBUG] GradioInterface.create_interface вызван ===")
+        logger.info("=== [DEBUG] GradioInterface.create_interface вызван ===")
         """
         ИСПРАВЛЕНО: Создание полного интерфейса
         Согласно правкам: модульная архитектура с всеми компонентами
@@ -1009,6 +1037,9 @@ class GradioInterface:
             return demo
             
         except Exception as e:
+            print("CRITICAL ERROR при создании интерфейса Gradio:", e)
+            import traceback
+            print(traceback.format_exc())
             logger.error(f"Ошибка создания интерфейса: {e}")
             # Возвращаем простой интерфейс в случае ошибки
             return gr.Interface(
@@ -1019,6 +1050,10 @@ class GradioInterface:
             )
 
     def _create_main_tab(self) -> None:
+        print("=== [DEBUG] GradioInterface._create_main_tab вызван ===")
+        logger.info("=== [DEBUG] GradioInterface._create_main_tab вызван ===")
+        print(f"[DEBUG] uploader instance: {self.widgets['smart_file_uploader']}")
+        print(f"[DEBUG] analyzer instance: {self.widgets['real_time_analyzer']}")
         """Создание главной вкладки"""
         with gr.Row():
             with gr.Column(scale=1):
@@ -1117,14 +1152,12 @@ class GradioInterface:
             with gr.Row():
                 # Аномалии во времени
                 self.temporal_anomalies = gr.JSON(
-                    label="Временные аномалии",
-                    height=300
+                    label="Временные аномалии"
                 )
                 
                 # Паттерны смены идентичности
                 self.identity_patterns = gr.JSON(
-                    label="Паттерны смены идентичности",
-                    height=300
+                    label="Паттерны смены идентичности"
                 )
 
     def _create_medical_tab(self) -> None:

@@ -1,0 +1,39 @@
+{
+  "timestamp": "2025-06-18T19:28:14.293166",
+  "version": "2.0",
+  "authenticity_weights": {
+    "geometry": 0.15,
+    "embedding": 0.3,
+    "texture": 0.1,
+    "temporal_consistency": 0.15,
+    "temporal_stability": 0.1,
+    "aging_consistency": 0.1,
+    "anomalies_score": 0.05,
+    "liveness_score": 0.05
+  },
+  "critical_thresholds": {
+    "min_authenticity_score": 0.6,
+    "min_quality_score": 0.2,
+    "max_shape_error": 0.3,
+    "min_cluster_size": 3,
+    "max_temporal_gap_days": 180,
+    "min_confidence_threshold": 0.5,
+    "anomaly_z_score_threshold": 2.5,
+    "cross_source_critical_distance": 0.5,
+    "landmark_mean_distance_threshold": 3.0,
+    "severe_asymmetry_threshold": 0.1,
+    "eye_region_error_threshold": 0.6,
+    "mild_asymmetry_threshold": 0.05,
+    "FEATURE_CHANGE_THRESHOLD": 0.1
+  },
+  "aging_model": {
+    "elasticity_loss_per_year": 0.015,
+    "tissue_sagging_per_year": 1.51,
+    "bone_stability_threshold": 25,
+    "ipd_stability": true,
+    "skull_growth_stops_age": 18,
+    "soft_tissue_aging_rate": 0.02,
+    "baseline_year": 1999
+  },
+  "hash": "75c3b8df47b1422e3e7b0e9ec3c9a137"
+}

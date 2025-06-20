@@ -91,6 +91,9 @@ FACE_ZONES = {
     "chin": "Подбородок"
 }
 
+# === ДОБАВЛЕНО: Порог для градиента (используется в анализе швов и пор)
+gradient_magnitude_threshold = 25
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def calculate_mean_std(data: np.ndarray) -> Tuple[float, float]:
@@ -1144,6 +1147,136 @@ class TextureAnalyzer:
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump(new_baselines, f, indent=2, ensure_ascii=False)
         logger.info(f"Базовые линии текстуры сохранены в {cache_file}")
+
+    def detect_texture_transition_artifacts(self, image: np.ndarray, zone_mask: np.ndarray) -> Dict[str, Any]:
+        """
+        Детектирование швов/краёв маски по Canny+Hough (по ТЗ)
+        Возвращает: есть ли артефакт, длина края, координаты
+        """
+        try:
+            logger.info("Детектирование швов/краёв маски (Canny+Hough)")
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+            masked = cv2.bitwise_and(gray, gray, mask=zone_mask)
+            edges = cv2.Canny(masked, 100, 200)
+            lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=30, minLineLength=20, maxLineGap=10)
+            edge_length = 0
+            coords = []
+            if lines is not None:
+                for l in lines:
+                    x1, y1, x2, y2 = l[0]
+                    length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                    edge_length += length
+                    coords.append(((x1, y1), (x2, y2)))
+            h = zone_mask.shape[0]
+            artifact = edge_length > 0.1 * h  # >10% высоты лица
+            return {"artifact": artifact, "edge_length": edge_length, "coords": coords}
+        except Exception as e:
+            logger.error(f"Ошибка detect_texture_transition_artifacts: {e}")
+            return {"artifact": False, "edge_length": 0, "coords": []}
+
+    def pore_circularity_score(self, region_img: np.ndarray) -> float:
+        """
+        Оценка округлости пор (по ТЗ: area, perimeter, circularity)
+        """
+        try:
+            logger.info("Расчет pore_circularity_score")
+            gray = cv2.cvtColor(region_img, cv2.COLOR_BGR2GRAY) if region_img.ndim == 3 else region_img
+            blur = cv2.GaussianBlur(gray, (3, 3), 0)
+            thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 35, 5)
+            opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+            labeled = label(opened)
+            props = regionprops(labeled)
+            circularities = []
+            for p in props:
+                if 3 < p.area < 200:
+                    perim = p.perimeter if p.perimeter > 0 else 1
+                    circ = 4 * math.pi * p.area / (perim ** 2)
+                    circularities.append(circ)
+            if not circularities:
+                return 0.0
+            return float(np.mean(circularities))
+        except Exception as e:
+            logger.error(f"Ошибка pore_circularity_score: {e}")
+            return 0.0
+
+    def _analyze_pore_distribution(self, region_img: np.ndarray) -> Dict[str, float]:
+        """
+        Анализ распределения пор: число, средний размер, плотность, округлость
+        """
+        try:
+            logger.info("Анализ распределения пор")
+            gray = cv2.cvtColor(region_img, cv2.COLOR_BGR2GRAY) if region_img.ndim == 3 else region_img
+            blur = cv2.GaussianBlur(gray, (3, 3), 0)
+            thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 35, 5)
+            opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+            labeled = label(opened)
+            props = regionprops(labeled)
+            areas = [p.area for p in props if 3 < p.area < 200]
+            circularities = [4 * math.pi * p.area / (p.perimeter ** 2) for p in props if p.perimeter > 0 and 3 < p.area < 200]
+            return {
+                "pore_count": len(areas),
+                "pore_mean_area": float(np.mean(areas)) if areas else 0.0,
+                "pore_density": float(len(areas)) / (region_img.shape[0] * region_img.shape[1]),
+                "pore_circularity_score": float(np.mean(circularities)) if circularities else 0.0
+            }
+        except Exception as e:
+            logger.error(f"Ошибка _analyze_pore_distribution: {e}")
+            return {"pore_count": 0, "pore_mean_area": 0.0, "pore_density": 0.0, "pore_circularity_score": 0.0}
+
+    def _analyze_micro_wrinkles(self, region_img: np.ndarray) -> Dict[str, float]:
+        """
+        Анализ микроморщин: число, длина, средний угол
+        """
+        try:
+            logger.info("Анализ микроморщин")
+            gray = cv2.cvtColor(region_img, cv2.COLOR_BGR2GRAY) if region_img.ndim == 3 else region_img
+            grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            mag = np.sqrt(grad_x ** 2 + grad_y ** 2)
+            mask = mag > self.gradient_magnitude_threshold
+            lines = cv2.HoughLinesP(mask.astype(np.uint8) * 255, 1, np.pi/180, threshold=10, minLineLength=5, maxLineGap=2)
+            count = 0
+            total_length = 0
+            angles = []
+            if lines is not None:
+                for l in lines:
+                    x1, y1, x2, y2 = l[0]
+                    length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                    total_length += length
+                    angle = np.arctan2(y2-y1, x2-x1)
+                    angles.append(angle)
+                    count += 1
+            return {
+                "wrinkle_count": count,
+                "wrinkle_total_length": float(total_length),
+                "wrinkle_mean_angle": float(np.mean(angles)) if angles else 0.0
+            }
+        except Exception as e:
+            logger.error(f"Ошибка _analyze_micro_wrinkles: {e}")
+            return {"wrinkle_count": 0, "wrinkle_total_length": 0.0, "wrinkle_mean_angle": 0.0}
+
+    def calculate_spectral_material_signature(self, texture_regions: list) -> Dict[str, float]:
+        """
+        Агрегация спектральных признаков по зонам (по ТЗ)
+        """
+        try:
+            logger.info("Агрегация спектральных признаков по зонам")
+            centroids = []
+            rolloffs = []
+            dom_freqs = []
+            for region in texture_regions:
+                spectrum = self.calculate_fourier_spectrum(region)
+                centroids.append(spectrum.get("spectral_centroid", 0.0))
+                rolloffs.append(spectrum.get("spectral_rolloff", 0.0))
+                dom_freqs.append(spectrum.get("dominant_frequency", 0.0))
+            return {
+                "mean_spectral_centroid": float(np.mean(centroids)) if centroids else 0.0,
+                "mean_spectral_rolloff": float(np.mean(rolloffs)) if rolloffs else 0.0,
+                "mean_dominant_frequency": float(np.mean(dom_freqs)) if dom_freqs else 0.0
+            }
+        except Exception as e:
+            logger.error(f"Ошибка calculate_spectral_material_signature: {e}")
+            return {"mean_spectral_centroid": 0.0, "mean_spectral_rolloff": 0.0, "mean_dominant_frequency": 0.0}
 
 # ==================== ТОЧКА ВХОДА ====================
 
