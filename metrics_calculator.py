@@ -1,756 +1,839 @@
-"""
-MetricsCalculator - Калькулятор 15 метрик идентичности
-Версия: 2.0
-Дата: 2025-06-15
-Исправлены все критические ошибки согласно правкам
-"""
-
+# metrics_calculator.py
+import os
+import json
+import logging
+import hashlib
+import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any, Union
+from dataclasses import dataclass, field, asdict
 import numpy as np
 import cv2
-import logging
-from typing import Dict, List, Tuple, Optional, Any, Union
-from pathlib import Path
-import json
-import math
-from scipy.spatial.distance import euclidean
-from scipy import stats
+from scipy.spatial.distance import euclidean, cosine
+from scipy.stats import zscore
+import pickle
+import time
+import psutil
+from functools import lru_cache
+import threading
+from collections import OrderedDict, defaultdict
 
-# --- ЦВЕТА КОНСОЛИ (Повторяются для каждого модуля, чтобы быть автономными) ---
-class Colors:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    CYAN = "\033[96m"
-    BLUE = "\033[94m"
-    PURPLE = "\033[95m"
-    WHITE = "\033[97m"
-
-# --- КАСТОМНЫЙ ФОРМАТТЕР ДЛЯ ЦВЕТНОГО ЛОГИРОВАНИЯ ---
-class ColoredFormatter(logging.Formatter):
-    FORMATS = {
-        logging.DEBUG: f"{Colors.CYAN}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.INFO: f"{Colors.GREEN}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.WARNING: f"{Colors.YELLOW}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.ERROR: f"{Colors.RED}%(levelname)s:{Colors.RESET} %(message)s",
-        logging.CRITICAL: f"{Colors.RED}{Colors.BOLD}%(levelname)s:{Colors.RESET} %(message)s"
-    }
-
-    def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
-        return formatter.format(record)
+from core_config import get_config
 
 # Настройка логирования
-log_file_handler = logging.FileHandler('logs/metricscalculator.log')
-log_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'))
-
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(ColoredFormatter())
-
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[
-        log_file_handler,
-        console_handler
-    ]
-)
 logger = logging.getLogger(__name__)
 
-# Импорт конфигурации
-try:
-    from core_config import (
-        CRITICAL_THRESHOLDS, CACHE_DIR, ERROR_CODES
-    )
-    logger.info(f"{Colors.GREEN}✔ Конфигурация успешно импортирована.{Colors.RESET}")
-except ImportError as e:
-    logger.critical(f"{Colors.RED}КРИТИЧЕСКАЯ ОШИБКА: Не удалось импортировать конфигурацию: {e}{Colors.RESET}")
-    # Значения по умолчанию
-    CRITICAL_THRESHOLDS = {"min_authenticity_score": 0.6}
-    CACHE_DIR = Path("cache")
-    ERROR_CODES = {"E001": "NO_FACE_DETECTED"}
+# === КОНСТАНТЫ И КОНФИГУРАЦИЯ ===
 
-# ==================== КОНСТАНТЫ МЕТРИК ====================
-
-# ИСПРАВЛЕНО: 15 метрик идентичности в 3 группах согласно правкам
-IDENTITY_METRICS_GROUPS = {
-    "skull_geometry": [
-        "skull_width_ratio",
-        "temporal_bone_angle", 
-        "zygomatic_arch_width",
-        "orbital_depth",
-        "occipital_curve"
-    ],
-    "facial_proportions": [
-        "cephalic_index",
-        "nasolabial_angle",
-        "orbital_index",
-        "forehead_height_ratio",
-        "chin_projection_ratio"
-    ],
-    "bone_structure": [
-        "interpupillary_distance_ratio",
-        "gonial_angle_asymmetry",
-        "zygomatic_angle",
-        "jaw_angle_ratio",
-        "mandibular_symphysis_angle"
-    ]
+# Индексы ключевых точек для расчета метрик идентичности
+SKULL_LANDMARKS = {
+    'forehead_width': [19, 24],  # Ширина лба
+    'temple_width': [0, 16],     # Ширина висков
+    'cheekbone_width': [1, 15],  # Ширина скул
+    'jaw_width': [5, 11],        # Ширина челюсти
+    'chin_width': [6, 10]        # Ширина подбородка
 }
 
-# Все 15 метрик в одном списке
-ALL_IDENTITY_METRICS = []
-for group_metrics in IDENTITY_METRICS_GROUPS.values():
-    ALL_IDENTITY_METRICS.extend(group_metrics)
-
-# Индексы ландмарок для расчетов
-LANDMARK_INDICES = {
-    "jaw_line": list(range(0, 17)),
-    "right_eyebrow": list(range(17, 22)),
-    "left_eyebrow": list(range(22, 27)),
-    "nose_bridge": list(range(27, 31)),
-    "lower_nose": list(range(31, 36)),
-    "right_eye": list(range(36, 42)),
-    "left_eye": list(range(42, 48)),
-    "outer_lip": list(range(48, 60)),
-    "inner_lip": list(range(60, 68))
+FACIAL_PROPORTIONS = {
+    'eye_distance': [36, 45],           # Межзрачковое расстояние
+    'nose_width': [31, 35],             # Ширина носа
+    'mouth_width': [48, 54],            # Ширина рта
+    'face_height': [27, 8],             # Высота лица
+    'nose_height': [27, 33],            # Высота носа
+    'upper_face_height': [19, 33],      # Высота верхней части лица
+    'lower_face_height': [33, 8]        # Высота нижней части лица
 }
 
-# ==================== ОСНОВНОЙ КЛАСС ====================
+# Группировка 15 метрик по категориям
+SKULL_METRICS = [
+    'forehead_width_ratio',
+    'temple_width_ratio', 
+    'cheekbone_width_ratio',
+    'jaw_width_ratio',
+    'chin_width_ratio',
+    'skull_length_ratio',
+    'cranial_vault_ratio'
+]
+
+PROPORTION_METRICS = [
+    'eye_distance_ratio',
+    'nose_width_ratio',
+    'mouth_width_ratio',
+    'face_height_ratio',
+    'nose_height_ratio',
+    'upper_face_ratio',
+    'lower_face_ratio',
+    'facial_index'
+]
+
+# Пороги для валидации метрик
+METRIC_RANGES = {
+    'forehead_width_ratio': (0.8, 1.2),
+    'temple_width_ratio': (0.85, 1.15),
+    'cheekbone_width_ratio': (0.9, 1.1),
+    'jaw_width_ratio': (0.85, 1.15),
+    'chin_width_ratio': (0.8, 1.2),
+    'skull_length_ratio': (0.9, 1.1),
+    'cranial_vault_ratio': (0.85, 1.15),
+    'eye_distance_ratio': (0.9, 1.1),
+    'nose_width_ratio': (0.8, 1.2),
+    'mouth_width_ratio': (0.85, 1.15),
+    'face_height_ratio': (0.9, 1.1),
+    'nose_height_ratio': (0.85, 1.15),
+    'upper_face_ratio': (0.9, 1.1),
+    'lower_face_ratio': (0.9, 1.1),
+    'facial_index': (0.8, 1.2)
+}
+
+# === СТРУКТУРЫ ДАННЫХ ===
+
+@dataclass
+class IdentityMetrics:
+    """Структура для хранения 15 метрик идентичности"""
+    image_id: str
+    filepath: str
+    
+    # Костные метрики (7 штук)
+    forehead_width_ratio: float = 0.0
+    temple_width_ratio: float = 0.0
+    cheekbone_width_ratio: float = 0.0
+    jaw_width_ratio: float = 0.0
+    chin_width_ratio: float = 0.0
+    skull_length_ratio: float = 0.0
+    cranial_vault_ratio: float = 0.0
+    
+    # Пропорциональные метрики (8 штук)
+    eye_distance_ratio: float = 0.0
+    nose_width_ratio: float = 0.0
+    mouth_width_ratio: float = 0.0
+    face_height_ratio: float = 0.0
+    nose_height_ratio: float = 0.0
+    upper_face_ratio: float = 0.0
+    lower_face_ratio: float = 0.0
+    facial_index: float = 0.0
+    
+    # Метаданные
+    pose_category: str = "frontal"
+    confidence_score: float = 0.0
+    normalization_factor: float = 1.0
+    baseline_reference: Optional[str] = None
+    
+    # Флаги качества
+    quality_flags: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    
+    # Статистика обработки
+    processing_time_ms: float = 0.0
+    calculation_method: str = "standard"
+    
+    def to_array(self) -> np.ndarray:
+        """Конвертация метрик в numpy массив"""
+        return np.array([
+            self.forehead_width_ratio, self.temple_width_ratio, self.cheekbone_width_ratio,
+            self.jaw_width_ratio, self.chin_width_ratio, self.skull_length_ratio,
+            self.cranial_vault_ratio, self.eye_distance_ratio, self.nose_width_ratio,
+            self.mouth_width_ratio, self.face_height_ratio, self.nose_height_ratio,
+            self.upper_face_ratio, self.lower_face_ratio, self.facial_index
+        ])
+    
+    def get_skull_metrics(self) -> Dict[str, float]:
+        """Получение только костных метрик"""
+        return {
+            'forehead_width_ratio': self.forehead_width_ratio,
+            'temple_width_ratio': self.temple_width_ratio,
+            'cheekbone_width_ratio': self.cheekbone_width_ratio,
+            'jaw_width_ratio': self.jaw_width_ratio,
+            'chin_width_ratio': self.chin_width_ratio,
+            'skull_length_ratio': self.skull_length_ratio,
+            'cranial_vault_ratio': self.cranial_vault_ratio
+        }
+    
+    def get_proportion_metrics(self) -> Dict[str, float]:
+        """Получение только пропорциональных метрик"""
+        return {
+            'eye_distance_ratio': self.eye_distance_ratio,
+            'nose_width_ratio': self.nose_width_ratio,
+            'mouth_width_ratio': self.mouth_width_ratio,
+            'face_height_ratio': self.face_height_ratio,
+            'nose_height_ratio': self.nose_height_ratio,
+            'upper_face_ratio': self.upper_face_ratio,
+            'lower_face_ratio': self.lower_face_ratio,
+            'facial_index': self.facial_index
+        }
+
+@dataclass
+class BaselineMetrics:
+    """Базовые метрики для нормализации"""
+    reference_period: str
+    mean_values: Dict[str, float]
+    std_values: Dict[str, float]
+    sample_count: int
+    creation_date: datetime.datetime
+    confidence_level: float
+
+@dataclass
+class MetricsComparison:
+    """Результат сравнения метрик"""
+    similarity_score: float
+    distance_euclidean: float
+    distance_cosine: float
+    outlier_metrics: List[str]
+    consistency_score: float
+    temporal_trend: Optional[str] = None
+
+# === ОСНОВНОЙ КЛАСС КАЛЬКУЛЯТОРА МЕТРИК ===
 
 class MetricsCalculator:
-    """
-    ИСПРАВЛЕНО: Калькулятор 15 метрик идентичности
-    Согласно правкам: 5+5+5 метрик в 3 группах
-    """
+    """Калькулятор для вычисления 15 метрик идентичности лица"""
     
     def __init__(self):
-        logger.info(f"{Colors.BOLD}--- Инициализация MetricsCalculator (Расчетчика метрик) ---{Colors.RESET}")
+        self.config = get_config()
+        self.cache_dir = Path("./cache/metrics")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Кэш вычислений
-        self.metrics_cache = {}
+        # Кэш результатов
+        self.metrics_cache: Dict[str, IdentityMetrics] = {}
+        self.baseline_cache: Dict[str, BaselineMetrics] = {}
         
-        # Базовые линии для нормализации
-        self.baseline_metrics = self._load_baseline_metrics()
-        
-        # Статистика вычислений
-        self.calculation_stats = {
-            "total_calculations": 0,
-            "successful_calculations": 0,
-            "failed_calculations": 0,
-            "cache_hits": 0
+        # Статистика
+        self.processing_stats = {
+            'total_calculated': 0,
+            'successful_calculations': 0,
+            'failed_calculations': 0,
+            'cache_hits': 0,
+            'baseline_normalizations': 0
         }
         
-        logger.info(f"{Colors.BOLD}--- MetricsCalculator успешно инициализирован ---{Colors.RESET}")
+        # Блокировка для потокобезопасности
+        self.calculation_lock = threading.Lock()
+        
+        # Загрузка baseline метрик
+        self._load_baseline_metrics()
+        
+        logger.info("MetricsCalculator инициализирован")
 
-    def _load_baseline_metrics(self) -> Dict[str, Dict[str, float]]:
-        """Загрузка базовых линий метрик"""
+    def _load_baseline_metrics(self):
+        """Загрузка базовых метрик для нормализации"""
         try:
-            baseline_file = CACHE_DIR / "metrics_baselines.json"
-            
-            if baseline_file.exists():
-                with open(baseline_file, 'r', encoding='utf-8') as f:
-                    baselines = json.load(f)
-                    logger.info(f"{Colors.GREEN}✔ Базовые линии метрик загружены из: {baseline_file}{Colors.RESET}")
-                    return baselines
+            baseline_path = self.cache_dir / "baseline_metrics.pkl"
+            if baseline_path.exists():
+                with open(baseline_path, 'rb') as f:
+                    self.baseline_cache = pickle.load(f)
+                logger.info(f"Загружено {len(self.baseline_cache)} baseline метрик")
             else:
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Файл базовых линий метрик не найден. Используются значения по умолчанию.{Colors.RESET}")
+                logger.info("Baseline метрики не найдены, будут созданы при первом использовании")
+                
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при загрузке базовых линий метрик: {e}{Colors.RESET}")
-        
-        # ИСПРАВЛЕНО: Значения по умолчанию для всех 15 метрик
-        logger.info("Использование значений по умолчанию для базовых линий метрик.")
-        return {
-            # Геометрия черепа (5)
-            "skull_width_ratio": {"mean": 0.75, "std": 0.05},
-            "temporal_bone_angle": {"mean": 110.0, "std": 8.0},
-            "zygomatic_arch_width": {"mean": 0.68, "std": 0.04},
-            "orbital_depth": {"mean": 0.25, "std": 0.03},
-            "occipital_curve": {"mean": 0.82, "std": 0.06},
-            
-            # Пропорции лица (5)
-            "cephalic_index": {"mean": 78.5, "std": 4.2},
-            "nasolabial_angle": {"mean": 102.0, "std": 8.5},
-            "orbital_index": {"mean": 85.0, "std": 6.0},
-            "forehead_height_ratio": {"mean": 0.35, "std": 0.04},
-            "chin_projection_ratio": {"mean": 0.28, "std": 0.03},
-            
-            # Костная структура (5)
-            "interpupillary_distance_ratio": {"mean": 0.32, "std": 0.02},
-            "gonial_angle_asymmetry": {"mean": 2.5, "std": 1.8},
-            "zygomatic_angle": {"mean": 125.0, "std": 7.0},
-            "jaw_angle_ratio": {"mean": 0.85, "std": 0.05},
-            "mandibular_symphysis_angle": {"mean": 75.0, "std": 5.5}
-        }
+            logger.error(f"Ошибка загрузки baseline метрик: {e}")
+            self.baseline_cache = {}
 
-    def calculate_identity_signature_metrics(self, landmarks_3d: np.ndarray, 
-                                           pose_category: str = "frontal") -> Dict[str, Any]:
+    def calculate_identity_signature_metrics(self, landmarks_package) -> Optional[IdentityMetrics]:
         """
-        ИСПРАВЛЕНО: Расчет 15 метрик идентичности
-        Согласно правкам: calculateidentitysignaturemetrics с 15 метриками
-        """
-        if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0 or landmarks_3d.shape[0] < 68:
-            logger.warning("Ландмарки не найдены или их недостаточно для расчёта метрик.")
-            return {}
+        Основная функция расчета 15 метрик идентичности
         
+        Args:
+            landmarks_package: Пакет с нормализованными ландмарками
+            
+        Returns:
+            Объект с метриками идентичности или None при ошибке
+        """
         try:
-            logger.info(f"{Colors.CYAN}Начинаем расчет 15 метрик идентичности для позы: '{pose_category}'...")
+            start_time = time.time()
+            
+            # Проверка входных данных
+            if landmarks_package is None or landmarks_package.normalized_landmarks is None:
+                logger.error("Отсутствуют нормализованные ландмарки")
+                self.processing_stats['failed_calculations'] += 1
+                return None
             
             # Проверка кэша
-            cache_key = f"{hash(landmarks_3d.tobytes())}_{pose_category}"
+            cache_key = landmarks_package.image_id
             if cache_key in self.metrics_cache:
-                self.calculation_stats["cache_hits"] += 1
-                logger.debug(f"Метрики найдены в кэше. Пропускаем расчет.")
-                return self.metrics_cache[cache_key]
+                self.processing_stats['cache_hits'] += 1
+                cached_result = self.metrics_cache[cache_key]
+                cached_result.processing_time_ms = (time.time() - start_time) * 1000
+                return cached_result
             
-            self.calculation_stats["total_calculations"] += 1
-            logger.debug(f"Метрики не найдены в кэше. Выполняем полный расчет.")
+            landmarks = landmarks_package.normalized_landmarks
+            pose_category = landmarks_package.pose_category
             
-            # Расчет всех 15 метрик
-            identity_metrics = {}
+            # Проверка количества ландмарков
+            if len(landmarks) < 68:
+                logger.error(f"Недостаточно ландмарков: {len(landmarks)}")
+                self.processing_stats['failed_calculations'] += 1
+                return None
             
-            logger.debug("Расчет метрик геометрии черепа...")
-            # ГРУППА 1: Геометрия черепа (5 метрик)
-            skull_metrics = self._calculate_skull_geometry_metrics(landmarks_3d)
-            identity_metrics.update(skull_metrics)
-            logger.debug(f"Рассчитано {len(skull_metrics)} метрик геометрии черепа.")
+            # Создание объекта метрик
+            metrics = IdentityMetrics(
+                image_id=landmarks_package.image_id,
+                filepath=landmarks_package.filepath,
+                pose_category=pose_category
+            )
             
-            logger.debug("Расчет метрик пропорций лица...")
-            # ГРУППА 2: Пропорции лица (5 метрик)
-            proportion_metrics = self._calculate_facial_proportion_metrics(landmarks_3d)
-            identity_metrics.update(proportion_metrics)
-            logger.debug(f"Рассчитано {len(proportion_metrics)} метрик пропорций лица.")
+            # Расчет костных метрик (7 штук)
+            self._calculate_skull_metrics(landmarks, metrics)
             
-            logger.debug("Расчет метрик костной структуры...")
-            # ГРУППА 3: Костная структура (5 метрик)
-            bone_metrics = self._calculate_bone_structure_metrics(landmarks_3d)
-            identity_metrics.update(bone_metrics)
-            logger.debug(f"Рассчитано {len(bone_metrics)} метрик костной структуры.")
+            # Расчет пропорциональных метрик (8 штук)
+            self._calculate_proportion_metrics(landmarks, metrics)
             
-            # Нормализация метрик
-            normalized_metrics = self._normalize_metrics(identity_metrics)
+            # Нормализация по baseline
+            self._normalize_by_baseline(metrics, pose_category)
             
-            # Результат
-            result = {
-                "raw_metrics": identity_metrics,
-                "normalized_metrics": normalized_metrics,
-                "pose_category": pose_category,
-                "metrics_count": len(identity_metrics),
-                "groups": {
-                    "skull_geometry": {k: normalized_metrics[k] for k in IDENTITY_METRICS_GROUPS["skull_geometry"] if k in normalized_metrics},
-                    "facial_proportions": {k: normalized_metrics[k] for k in IDENTITY_METRICS_GROUPS["facial_proportions"] if k in normalized_metrics},
-                    "bone_structure": {k: normalized_metrics[k] for k in IDENTITY_METRICS_GROUPS["bone_structure"] if k in normalized_metrics}
-                }
-            }
+            # Валидация результатов
+            self._validate_metrics(metrics)
             
-            # Кэширование результата
-            self.metrics_cache[cache_key] = result
+            # Расчет общего балла достоверности
+            metrics.confidence_score = self._calculate_confidence_score(metrics)
             
-            self.calculation_stats["successful_calculations"] += 1
-            logger.info(f"{Colors.GREEN}✔ Успешно рассчитано {len(identity_metrics)} метрик идентичности.{Colors.RESET}")
+            # Метаданные обработки
+            metrics.processing_time_ms = (time.time() - start_time) * 1000
+            metrics.calculation_method = "normalized_landmarks"
             
-            return result
+            # Сохранение в кэш
+            self.metrics_cache[cache_key] = metrics
+            
+            self.processing_stats['successful_calculations'] += 1
+            self.processing_stats['total_calculated'] += 1
+            
+            logger.debug(f"Метрики рассчитаны за {metrics.processing_time_ms:.1f}мс")
+            return metrics
             
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при расчете метрик идентичности: {e}{Colors.RESET}")
-            self.calculation_stats["failed_calculations"] += 1
-            return {}
+            logger.error(f"Ошибка расчета метрик: {e}")
+            self.processing_stats['failed_calculations'] += 1
+            self.processing_stats['total_calculated'] += 1
+            return None
 
-    def _calculate_skull_geometry_metrics(self, landmarks_3d: np.ndarray) -> Dict[str, float]:
-        """
-        ИСПРАВЛЕНО: Расчет 5 метрик геометрии черепа
-        Согласно правкам: skull_width_ratio, temporal_bone_angle, zygomatic_arch_width, orbital_depth, occipital_curve
-        """
+    def _calculate_skull_metrics(self, landmarks: np.ndarray, metrics: IdentityMetrics):
+        """Расчет 7 костных метрик"""
         try:
-            # logger.debug("Расчет метрик геометрии черепа") # Отключено, т.к. уже есть в calculate_identity_signature_metrics
+            # 1. Ширина лба (forehead_width_ratio)
+            forehead_points = [landmarks[i] for i in SKULL_LANDMARKS['forehead_width']]
+            forehead_width = self._calculate_distance_2d(forehead_points[0], forehead_points[1])
             
-            skull_metrics = {}
+            # 2. Ширина висков (temple_width_ratio)
+            temple_points = [landmarks[i] for i in SKULL_LANDMARKS['temple_width']]
+            temple_width = self._calculate_distance_2d(temple_points[0], temple_points[1])
             
-            # 1. ИСПРАВЛЕНО: skull_width_ratio - отношение ширины черепа к высоте лица
-            # Ширина черепа: расстояние между височными точками (приблизительно точки 0 и 16)
-            skull_width = euclidean(landmarks_3d[0], landmarks_3d[16])
-            # Высота лица: от подбородка до лба
-            face_height = euclidean(landmarks_3d[8], landmarks_3d[27])  # подбородок - переносица
-            skull_metrics["skull_width_ratio"] = skull_width / (face_height + 1e-8)
+            # 3. Ширина скул (cheekbone_width_ratio)
+            cheekbone_points = [landmarks[i] for i in SKULL_LANDMARKS['cheekbone_width']]
+            cheekbone_width = self._calculate_distance_2d(cheekbone_points[0], cheekbone_points[1])
             
-            # 2. ИСПРАВЛЕНО: temporal_bone_angle - угол височной кости
-            # Используем точки височной области (приблизительно 0, 1, 2 для правой стороны)
-            if len(landmarks_3d) >= 17:
-                vec1 = landmarks_3d[1] - landmarks_3d[0]
-                vec2 = landmarks_3d[2] - landmarks_3d[1]
-                temporal_angle = self._calculate_angle_between_vectors(vec1, vec2)
-                skull_metrics["temporal_bone_angle"] = temporal_angle
+            # 4. Ширина челюсти (jaw_width_ratio)
+            jaw_points = [landmarks[i] for i in SKULL_LANDMARKS['jaw_width']]
+            jaw_width = self._calculate_distance_2d(jaw_points[0], jaw_points[1])
+            
+            # 5. Ширина подбородка (chin_width_ratio)
+            chin_points = [landmarks[i] for i in SKULL_LANDMARKS['chin_width']]
+            chin_width = self._calculate_distance_2d(chin_points[0], chin_points[1])
+            
+            # 6. Длина черепа (skull_length_ratio)
+            skull_length = self._calculate_distance_2d(landmarks[27], landmarks[8])  # Переносица - подбородок
+            
+            # 7. Свод черепа (cranial_vault_ratio)
+            cranial_vault = self._calculate_cranial_vault_ratio(landmarks)
+            
+            # Нормализация относительно межзрачкового расстояния
+            iod = self._calculate_distance_2d(landmarks[36], landmarks[45])
+            if iod > 0:
+                metrics.forehead_width_ratio = forehead_width / iod
+                metrics.temple_width_ratio = temple_width / iod
+                metrics.cheekbone_width_ratio = cheekbone_width / iod
+                metrics.jaw_width_ratio = jaw_width / iod
+                metrics.chin_width_ratio = chin_width / iod
+                metrics.skull_length_ratio = skull_length / iod
+                metrics.cranial_vault_ratio = cranial_vault
+                metrics.normalization_factor = iod
             else:
-                skull_metrics["temporal_bone_angle"] = 110.0  # Значение по умолчанию
-            
-            # 3. ИСПРАВЛЕНО: zygomatic_arch_width - ширина скуловых дуг
-            # Используем точки скуловой области
-            left_zygomatic = landmarks_3d[3]   # Левая скуловая точка
-            right_zygomatic = landmarks_3d[13] # Правая скуловая точка
-            zygomatic_width = euclidean(left_zygomatic, right_zygomatic)
-            skull_metrics["zygomatic_arch_width"] = zygomatic_width / (face_height + 1e-8)
-            
-            # 4. ИСПРАВЛЕНО: orbital_depth - глубина орбит
-            # Используем точки глаз для приблизительной оценки глубины
-            left_eye_center = np.mean(landmarks_3d[42:48], axis=0)
-            right_eye_center = np.mean(landmarks_3d[36:42], axis=0)
-            nose_bridge = landmarks_3d[27]
-            
-            # Глубина как расстояние от центра глаз до переносицы
-            left_orbital_depth = euclidean(left_eye_center, nose_bridge)
-            right_orbital_depth = euclidean(right_eye_center, nose_bridge)
-            avg_orbital_depth = (left_orbital_depth + right_orbital_depth) / 2
-            skull_metrics["orbital_depth"] = avg_orbital_depth / (face_height + 1e-8)
-            
-            # 5. ИСПРАВЛЕНО: occipital_curve - кривизна затылочной области
-            # Приблизительная оценка через кривизну контура лица
-            jaw_points = landmarks_3d[0:17]  # Контур челюсти
-            if len(jaw_points) >= 3:
-                # Расчет кривизны через изменение углов
-                curvatures = []
-                for i in range(1, len(jaw_points) - 1):
-                    vec1 = jaw_points[i] - jaw_points[i-1]
-                    vec2 = jaw_points[i+1] - jaw_points[i]
-                    angle = self._calculate_angle_between_vectors(vec1, vec2)
-                    curvatures.append(abs(180 - angle))  # Отклонение от прямой линии
+                logger.warning("Нулевое межзрачковое расстояние")
                 
-                avg_curvature = np.mean(curvatures) if curvatures else 0.0
-                skull_metrics["occipital_curve"] = avg_curvature / 180.0  # Нормализация
-            else:
-                skull_metrics["occipital_curve"] = 0.5
-            
-            # logger.debug(f"Рассчитано {len(skull_metrics)} метрик геометрии черепа") # Отключено
-            return skull_metrics
-            
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при расчете метрик геометрии черепа: {e}{Colors.RESET}")
-            return {}
+            logger.error(f"Ошибка расчета костных метрик: {e}")
+            metrics.warnings.append(f"Ошибка костных метрик: {str(e)}")
 
-    def _calculate_facial_proportion_metrics(self, landmarks_3d: np.ndarray) -> Dict[str, float]:
-        """
-        ИСПРАВЛЕНО: Расчет 5 метрик пропорций лица
-        Согласно правкам: cephalic_index, nasolabial_angle, orbital_index, forehead_height_ratio, chin_projection_ratio
-        """
+    def _calculate_proportion_metrics(self, landmarks: np.ndarray, metrics: IdentityMetrics):
+        """Расчет 8 пропорциональных метрик"""
         try:
-            # logger.debug("Расчет метрик пропорций лица") # Отключено
+            # Базовые расстояния
+            iod = self._calculate_distance_2d(landmarks[36], landmarks[45])  # Межзрачковое расстояние
             
-            proportion_metrics = {}
+            if iod <= 0:
+                logger.warning("Нулевое межзрачковое расстояние для пропорций")
+                return
             
-            # 1. ИСПРАВЛЕНО: cephalic_index - черепной индекс (ширина/длина * 100)
-            skull_width = euclidean(landmarks_3d[0], landmarks_3d[16])
-            # Длина черепа приблизительно через расстояние от лба до подбородка
-            skull_length = euclidean(landmarks_3d[8], landmarks_3d[27])
-            cephalic_index = (skull_width / (skull_length + 1e-8)) * 100
-            proportion_metrics["cephalic_index"] = cephalic_index
+            # 1. Межзрачковое расстояние (eye_distance_ratio) - нормализовано к 1.0
+            metrics.eye_distance_ratio = 1.0
             
-            # 2. ИСПРАВЛЕНО: nasolabial_angle - носогубный угол
-            # Используем точки носа и рта
-            nose_tip = landmarks_3d[33]      # Кончик носа
-            nose_base = landmarks_3d[51]     # Основание носа (центр верхней губы)
-            mouth_corner = landmarks_3d[48]  # Уголок рта
+            # 2. Ширина носа (nose_width_ratio)
+            nose_points = [landmarks[i] for i in FACIAL_PROPORTIONS['nose_width']]
+            nose_width = self._calculate_distance_2d(nose_points[0], nose_points[1])
+            metrics.nose_width_ratio = nose_width / iod
             
-            vec1 = nose_base - nose_tip
-            vec2 = mouth_corner - nose_base
-            nasolabial_angle = self._calculate_angle_between_vectors(vec1, vec2)
-            proportion_metrics["nasolabial_angle"] = nasolabial_angle
+            # 3. Ширина рта (mouth_width_ratio)
+            mouth_points = [landmarks[i] for i in FACIAL_PROPORTIONS['mouth_width']]
+            mouth_width = self._calculate_distance_2d(mouth_points[0], mouth_points[1])
+            metrics.mouth_width_ratio = mouth_width / iod
             
-            # 3. ИСПРАВЛЕНО: orbital_index - орбитальный индекс
-            # Отношение высоты орбиты к ширине
-            left_eye_width = euclidean(landmarks_3d[36], landmarks_3d[39])   # Ширина левого глаза
-            left_eye_height = euclidean(landmarks_3d[37], landmarks_3d[41])  # Высота левого глаза
-            right_eye_width = euclidean(landmarks_3d[42], landmarks_3d[45])  # Ширина правого глаза
-            right_eye_height = euclidean(landmarks_3d[43], landmarks_3d[47]) # Высота правого глаза
+            # 4. Высота лица (face_height_ratio)
+            face_points = [landmarks[i] for i in FACIAL_PROPORTIONS['face_height']]
+            face_height = self._calculate_distance_2d(face_points[0], face_points[1])
+            metrics.face_height_ratio = face_height / iod
             
-            avg_eye_width = (left_eye_width + right_eye_width) / 2
-            avg_eye_height = (left_eye_height + right_eye_height) / 2
-            orbital_index = (avg_eye_height / (avg_eye_width + 1e-8)) * 100
-            proportion_metrics["orbital_index"] = orbital_index
+            # 5. Высота носа (nose_height_ratio)
+            nose_height_points = [landmarks[i] for i in FACIAL_PROPORTIONS['nose_height']]
+            nose_height = self._calculate_distance_2d(nose_height_points[0], nose_height_points[1])
+            metrics.nose_height_ratio = nose_height / iod
             
-            # 4. ИСПРАВЛЕНО: forehead_height_ratio - отношение высоты лба к высоте лица
-            # Высота лба: от бровей до линии волос (приблизительно)
-            brow_center = np.mean(landmarks_3d[19:25], axis=0)  # Центр бровей
-            # Приблизительная линия волос (выше бровей)
-            forehead_top = brow_center.copy()
-            forehead_top[1] -= 40  # Смещение вверх (приблизительно)
+            # 6. Высота верхней части лица (upper_face_ratio)
+            upper_face_points = [landmarks[i] for i in FACIAL_PROPORTIONS['upper_face_height']]
+            upper_face_height = self._calculate_distance_2d(upper_face_points[0], upper_face_points[1])
+            metrics.upper_face_ratio = upper_face_height / iod
             
-            forehead_height = euclidean(brow_center, forehead_top)
-            face_height = euclidean(landmarks_3d[8], brow_center)  # От подбородка до бровей
-            forehead_height_ratio = forehead_height / (face_height + 1e-8)
-            proportion_metrics["forehead_height_ratio"] = forehead_height_ratio
+            # 7. Высота нижней части лица (lower_face_ratio)
+            lower_face_points = [landmarks[i] for i in FACIAL_PROPORTIONS['lower_face_height']]
+            lower_face_height = self._calculate_distance_2d(lower_face_points[0], lower_face_points[1])
+            metrics.lower_face_ratio = lower_face_height / iod
             
-            # 5. ИСПРАВЛЕНО: chin_projection_ratio - выступание подбородка
-            chin_point = landmarks_3d[8]     # Точка подбородка
-            mouth_center = landmarks_3d[51]  # Центр рта
-            nose_base = landmarks_3d[33]     # Основание носа
-            
-            # Проекция подбородка относительно линии нос-рот
-            chin_projection = euclidean(chin_point, mouth_center)
-            face_depth = euclidean(nose_base, mouth_center)
-            chin_projection_ratio = chin_projection / (face_depth + 1e-8)
-            proportion_metrics["chin_projection_ratio"] = chin_projection_ratio
-            
-            # logger.debug(f"Рассчитано {len(proportion_metrics)} метрик пропорций лица") # Отключено
-            return proportion_metrics
+            # 8. Лицевой индекс (facial_index)
+            metrics.facial_index = face_height / cheekbone_width if hasattr(metrics, 'cheekbone_width_ratio') and metrics.cheekbone_width_ratio > 0 else face_height / iod
             
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при расчете метрик пропорций лица: {e}{Colors.RESET}")
-            return {}
+            logger.error(f"Ошибка расчета пропорциональных метрик: {e}")
+            metrics.warnings.append(f"Ошибка пропорциональных метрик: {str(e)}")
 
-    def _calculate_bone_structure_metrics(self, landmarks_3d: np.ndarray) -> Dict[str, float]:
-        """
-        ИСПРАВЛЕНО: Расчет 5 метрик костной структуры
-        Согласно правкам: interpupillary_distance_ratio, gonial_angle_asymmetry, zygomatic_angle, jaw_angle_ratio, mandibular_symphysis_angle
-        """
+    def _calculate_distance_2d(self, point1: np.ndarray, point2: np.ndarray) -> float:
+        """Расчет 2D расстояния между точками"""
         try:
-            # logger.debug("Расчет метрик костной структуры") # Отключено
-            
-            bone_metrics = {}
-            
-            # 1. ИСПРАВЛЕНО: interpupillary_distance_ratio - межзрачковое расстояние
-            left_eye_center = np.mean(landmarks_3d[42:48], axis=0)
-            right_eye_center = np.mean(landmarks_3d[36:42], axis=0)
-            interpupillary_distance = euclidean(left_eye_center, right_eye_center)
-            
-            # Нормализация по ширине лица
-            face_width = euclidean(landmarks_3d[0], landmarks_3d[16])
-            ipd_ratio = interpupillary_distance / (face_width + 1e-8)
-            bone_metrics["interpupillary_distance_ratio"] = ipd_ratio
-            
-            # 2. ИСПРАВЛЕНО: gonial_angle_asymmetry - асимметрия углов нижней челюсти
-            # Углы нижней челюсти (gonial angles)
-            left_gonial_points = [landmarks_3d[2], landmarks_3d[3], landmarks_3d[4]]
-            right_gonial_points = [landmarks_3d[12], landmarks_3d[13], landmarks_3d[14]]
-            
-            # Расчет углов
-            left_gonial_angle = self._calculate_angle_from_three_points(
-                left_gonial_points[0], left_gonial_points[1], left_gonial_points[2]
-            )
-            right_gonial_angle = self._calculate_angle_from_three_points(
-                right_gonial_points[0], right_gonial_points[1], right_gonial_points[2]
-            )
-            
-            gonial_asymmetry = abs(left_gonial_angle - right_gonial_angle)
-            bone_metrics["gonial_angle_asymmetry"] = gonial_asymmetry
-            
-            # 3. ИСПРАВЛЕНО: zygomatic_angle - угол скуловой кости
-            # Используем точки скуловой области
-            left_zygomatic = landmarks_3d[3]
-            right_zygomatic = landmarks_3d[13]
-            nose_bridge = landmarks_3d[27]
-            
-            # Угол между скуловыми точками и переносицей
-            vec1 = left_zygomatic - nose_bridge
-            vec2 = right_zygomatic - nose_bridge
-            zygomatic_angle = self._calculate_angle_between_vectors(vec1, vec2)
-            bone_metrics["zygomatic_angle"] = zygomatic_angle
-            
-            # 4. ИСПРАВЛЕНО: jaw_angle_ratio - отношение углов челюсти
-            # Отношение ширины челюсти в разных точках
-            upper_jaw_width = euclidean(landmarks_3d[3], landmarks_3d[13])   # Верхняя часть
-            lower_jaw_width = euclidean(landmarks_3d[5], landmarks_3d[11])   # Нижняя часть
-            jaw_angle_ratio = upper_jaw_width / (lower_jaw_width + 1e-8)
-            bone_metrics["jaw_angle_ratio"] = jaw_angle_ratio
-            
-            # 5. ИСПРАВЛЕНО: mandibular_symphysis_angle - угол симфиза нижней челюсти
-            # Угол в области подбородка
-            chin_left = landmarks_3d[6]
-            chin_center = landmarks_3d[8]
-            chin_right = landmarks_3d[10]
-            
-            mandibular_angle = self._calculate_angle_from_three_points(
-                chin_left, chin_center, chin_right
-            )
-            bone_metrics["mandibular_symphysis_angle"] = mandibular_angle
-            
-            # logger.debug(f"Рассчитано {len(bone_metrics)} метрик костной структуры") # Отключено
-            return bone_metrics
-            
+            return float(np.linalg.norm(point1[:2] - point2[:2]))
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при расчете метрик костной структуры: {e}{Colors.RESET}")
-            return {}
-
-    def _calculate_angle_between_vectors(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        """Расчет угла между двумя векторами в градусах"""
-        try:
-            # Нормализация векторов
-            vec1_norm = vec1 / (np.linalg.norm(vec1) + 1e-8)
-            vec2_norm = vec2 / (np.linalg.norm(vec2) + 1e-8)
-            
-            # Скалярное произведение
-            dot_product = np.clip(np.dot(vec1_norm, vec2_norm), -1.0, 1.0)
-            
-            # Угол в радианах, затем в градусах
-            angle_rad = np.arccos(dot_product)
-            angle_deg = np.degrees(angle_rad)
-            
-            return float(angle_deg)
-            
-        except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при расчете угла между векторами: {e}{Colors.RESET}")
+            logger.error(f"Ошибка расчета расстояния: {e}")
             return 0.0
 
-    def _calculate_angle_from_three_points(self, p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> float:
-        """Расчет угла в точке p2, образованного точками p1-p2-p3"""
+    def _calculate_cranial_vault_ratio(self, landmarks: np.ndarray) -> float:
+        """Расчет соотношения свода черепа"""
         try:
-            vec1 = p1 - p2
-            vec2 = p3 - p2
-            return self._calculate_angle_between_vectors(vec1, vec2)
+            # Используем точки бровей для оценки высоты свода
+            left_brow = np.mean(landmarks[22:27, :2], axis=0)
+            right_brow = np.mean(landmarks[17:22, :2], axis=0)
+            brow_center = (left_brow + right_brow) / 2
             
-        except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при расчете угла из трех точек: {e}{Colors.RESET}")
-            return 0.0
-
-    def _normalize_metrics(self, raw_metrics: Dict[str, float]) -> Dict[str, float]:
-        """
-        ИСПРАВЛЕНО: Нормализация метрик по базовым линиям
-        Согласно правкам: z-score нормализация
-        """
-        try:
-            logger.debug("Нормализация метрик...")
-            normalized = {}
+            # Точка подбородка
+            chin = landmarks[8, :2]
             
-            for metric_name, value in raw_metrics.items():
-                if metric_name in self.baseline_metrics:
-                    baseline = self.baseline_metrics[metric_name]
-                    mean = baseline["mean"]
-                    std = baseline["std"]
-                    
-                    # Z-score нормализация
-                    z_score = (value - mean) / (std + 1e-8)
-                    
-                    # Преобразование в диапазон [0, 1] через sigmoid
-                    normalized_value = 1 / (1 + np.exp(-z_score))
-                    normalized[metric_name] = float(normalized_value)
-                else:
-                    # Если нет базовой линии, оставляем как есть
-                    normalized[metric_name] = float(value)
-                    logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Для метрики '{metric_name}' не найдена базовая линия. Нормализация не выполнена.{Colors.RESET}")
+            # Высота от бровей до подбородка
+            vault_height = np.linalg.norm(brow_center - chin)
             
-            logger.debug("Нормализация метрик завершена.")
-            return normalized
+            # Ширина лица на уровне скул
+            cheek_width = np.linalg.norm(landmarks[1, :2] - landmarks[15, :2])
             
-        except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при нормализации метрик: {e}{Colors.RESET}")
-            return raw_metrics
-
-    def calculate_metrics_similarity(self, metrics1: Dict[str, float], 
-                                   metrics2: Dict[str, float]) -> Dict[str, Any]:
-        """
-        ИСПРАВЛЕНО: Расчет схожести между наборами метрик
-        Согласно правкам: cosine similarity и euclidean distance
-        """
-        try:
-            logger.info(f"{Colors.CYAN}Расчет схожести двух наборов метрик...{Colors.RESET}")
-            
-            # Общие метрики
-            common_metrics = set(metrics1.keys()) & set(metrics2.keys())
-            
-            if not common_metrics:
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Нет общих метрик для сравнения схожести. Возвращаем нулевую схожесть.{Colors.RESET}")
-                return {"similarity": 0.0, "distance": float('inf'), "common_metrics": 0}
-            
-            # Векторы значений
-            vec1 = np.array([metrics1[metric] for metric in common_metrics])
-            vec2 = np.array([metrics2[metric] for metric in common_metrics])
-            
-            # Cosine similarity
-            dot_product = np.dot(vec1, vec2)
-            norm1 = np.linalg.norm(vec1)
-            norm2 = np.linalg.norm(vec2)
-            
-            if norm1 == 0 or norm2 == 0:
-                cosine_similarity = 0.0
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Один из векторов метрик равен нулю, косинусная схожесть будет 0.{Colors.RESET}")
+            if cheek_width > 0:
+                return float(vault_height / cheek_width)
             else:
-                cosine_similarity = dot_product / (norm1 * norm2)
+                return 1.0
+                
+        except Exception as e:
+            logger.error(f"Ошибка расчета свода черепа: {e}")
+            return 1.0
+
+    def _normalize_by_baseline(self, metrics: IdentityMetrics, pose_category: str):
+        """Нормализация метрик по baseline"""
+        try:
+            baseline_key = f"baseline_{pose_category}"
             
-            # Euclidean distance
-            euclidean_distance = np.linalg.norm(vec1 - vec2)
+            if baseline_key in self.baseline_cache:
+                baseline = self.baseline_cache[baseline_key]
+                
+                # Нормализация каждой метрики
+                for metric_name in SKULL_METRICS + PROPORTION_METRICS:
+                    current_value = getattr(metrics, metric_name, 0.0)
+                    baseline_mean = baseline.mean_values.get(metric_name, current_value)
+                    baseline_std = baseline.std_values.get(metric_name, 1.0)
+                    
+                    if baseline_std > 0:
+                        # Z-score нормализация
+                        normalized_value = (current_value - baseline_mean) / baseline_std
+                        # Конвертация обратно в ratio (добавляем 1.0 для центрирования)
+                        setattr(metrics, metric_name, 1.0 + normalized_value * 0.1)
+                    
+                metrics.baseline_reference = baseline_key
+                self.processing_stats['baseline_normalizations'] += 1
+                
+        except Exception as e:
+            logger.error(f"Ошибка нормализации по baseline: {e}")
+            metrics.warnings.append(f"Ошибка нормализации: {str(e)}")
+
+    def _validate_metrics(self, metrics: IdentityMetrics):
+        """Валидация рассчитанных метрик"""
+        try:
+            for metric_name in SKULL_METRICS + PROPORTION_METRICS:
+                value = getattr(metrics, metric_name, 0.0)
+                min_val, max_val = METRIC_RANGES.get(metric_name, (0.0, 2.0))
+                
+                if not (min_val <= value <= max_val):
+                    metrics.quality_flags.append(f"out_of_range_{metric_name}")
+                    metrics.warnings.append(f"Метрика {metric_name} вне диапазона: {value:.3f}")
+                
+                if np.isnan(value) or np.isinf(value):
+                    metrics.quality_flags.append(f"invalid_{metric_name}")
+                    metrics.warnings.append(f"Недопустимое значение {metric_name}: {value}")
+                    setattr(metrics, metric_name, 1.0)  # Устанавливаем нейтральное значение
+                    
+        except Exception as e:
+            logger.error(f"Ошибка валидации метрик: {e}")
+            metrics.warnings.append(f"Ошибка валидации: {str(e)}")
+
+    def _calculate_confidence_score(self, metrics: IdentityMetrics) -> float:
+        """Расчет общего балла достоверности метрик"""
+        try:
+            # Количество валидных метрик
+            total_metrics = len(SKULL_METRICS + PROPORTION_METRICS)
+            invalid_metrics = len([flag for flag in metrics.quality_flags if 'invalid_' in flag])
+            out_of_range_metrics = len([flag for flag in metrics.quality_flags if 'out_of_range_' in flag])
             
-            # Нормализованное расстояние
-            max_possible_distance = np.sqrt(len(common_metrics) * 2)  # Максимальное расстояние для нормализованных метрик
-            normalized_distance = euclidean_distance / max_possible_distance
+            # Базовый балл
+            base_score = (total_metrics - invalid_metrics) / total_metrics
             
-            # Общий балл схожести
-            similarity_score = (cosine_similarity + (1 - normalized_distance)) / 2
+            # Штраф за выход из диапазона
+            range_penalty = out_of_range_metrics / total_metrics * 0.5
             
-            result = {
-                "similarity": float(np.clip(similarity_score, 0.0, 1.0)),
-                "cosine_similarity": float(cosine_similarity),
-                "euclidean_distance": float(euclidean_distance),
-                "normalized_distance": float(normalized_distance),
-                "common_metrics": len(common_metrics),
-                "total_metrics": len(set(metrics1.keys()) | set(metrics2.keys()))
+            # Итоговый балл
+            confidence = max(0.0, base_score - range_penalty)
+            
+            return float(confidence)
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета достоверности: {e}")
+            return 0.5
+
+    def compare_metrics(self, metrics1: IdentityMetrics, metrics2: IdentityMetrics) -> MetricsComparison:
+        """
+        Сравнение двух наборов метрик
+        
+        Args:
+            metrics1: Первый набор метрик
+            metrics2: Второй набор метрик
+            
+        Returns:
+            Результат сравнения
+        """
+        try:
+            # Конвертация в массивы
+            array1 = metrics1.to_array()
+            array2 = metrics2.to_array()
+            
+            # Расчет расстояний
+            euclidean_dist = float(euclidean(array1, array2))
+            cosine_dist = float(cosine(array1, array2))
+            
+            # Поиск выбросов
+            diff = np.abs(array1 - array2)
+            outlier_threshold = np.mean(diff) + 2 * np.std(diff)
+            outlier_indices = np.where(diff > outlier_threshold)[0]
+            
+            metric_names = SKULL_METRICS + PROPORTION_METRICS
+            outlier_metrics = [metric_names[i] for i in outlier_indices if i < len(metric_names)]
+            
+            # Расчет схожести (обратная величина расстояния)
+            similarity = 1.0 / (1.0 + euclidean_dist)
+            
+            # Расчет консистентности
+            consistency = 1.0 - min(1.0, len(outlier_metrics) / len(metric_names))
+            
+            return MetricsComparison(
+                similarity_score=similarity,
+                distance_euclidean=euclidean_dist,
+                distance_cosine=cosine_dist,
+                outlier_metrics=outlier_metrics,
+                consistency_score=consistency
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка сравнения метрик: {e}")
+            return MetricsComparison(
+                similarity_score=0.0,
+                distance_euclidean=float('inf'),
+                distance_cosine=1.0,
+                outlier_metrics=[],
+                consistency_score=0.0
+            )
+
+    def analyze_metrics_consistency(self, metrics_list: List[IdentityMetrics]) -> Dict[str, Any]:
+        """
+        Анализ консистентности метрик во времени
+        
+        Args:
+            metrics_list: Список метрик для анализа
+            
+        Returns:
+            Словарь с результатами анализа
+        """
+        try:
+            if len(metrics_list) < 2:
+                return {'error': 'Недостаточно данных для анализа'}
+            
+            # Конвертация в матрицу
+            metrics_matrix = np.array([m.to_array() for m in metrics_list])
+            
+            # Статистика по каждой метрике
+            means = np.mean(metrics_matrix, axis=0)
+            stds = np.std(metrics_matrix, axis=0)
+            cvs = stds / means  # Коэффициент вариации
+            
+            metric_names = SKULL_METRICS + PROPORTION_METRICS
+            
+            # Анализ стабильности
+            stable_metrics = []
+            unstable_metrics = []
+            
+            for i, (name, cv) in enumerate(zip(metric_names, cvs)):
+                if cv < 0.1:  # Менее 10% вариации
+                    stable_metrics.append(name)
+                elif cv > 0.3:  # Более 30% вариации
+                    unstable_metrics.append(name)
+            
+            # Общая оценка консистентности
+            overall_consistency = 1.0 - np.mean(cvs)
+            
+            # Поиск трендов
+            trends = self._analyze_temporal_trends(metrics_matrix, metric_names)
+            
+            return {
+                'total_samples': len(metrics_list),
+                'overall_consistency': float(overall_consistency),
+                'stable_metrics': stable_metrics,
+                'unstable_metrics': unstable_metrics,
+                'mean_values': {name: float(mean) for name, mean in zip(metric_names, means)},
+                'std_values': {name: float(std) for name, std in zip(metric_names, stds)},
+                'cv_values': {name: float(cv) for name, cv in zip(metric_names, cvs)},
+                'trends': trends
             }
             
-            logger.info(f"{Colors.GREEN}✔ Расчет схожести метрик завершен. Общая схожесть: {result['similarity']:.3f}{Colors.RESET}")
-            return result
-            
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при расчете схожести метрик: {e}{Colors.RESET}")
-            return {"similarity": 0.0, "distance": float('inf'), "common_metrics": 0}
+            logger.error(f"Ошибка анализа консистентности: {e}")
+            return {'error': str(e)}
 
-    def validate_metrics_consistency(self, metrics_timeline: List[Dict[str, float]]) -> Dict[str, Any]:
-        """
-        ИСПРАВЛЕНО: Валидация согласованности метрик во времени
-        Согласно правкам: coefficient of variation и trend analysis
-        """
+    def _analyze_temporal_trends(self, metrics_matrix: np.ndarray, metric_names: List[str]) -> Dict[str, str]:
+        """Анализ временных трендов в метриках"""
         try:
-            logger.info(f"{Colors.CYAN}Проверка согласованности {len(metrics_timeline)} наборов метрик во времени...{Colors.RESET}")
+            trends = {}
             
-            if len(metrics_timeline) < 2:
-                logger.warning(f"{Colors.YELLOW}ПРЕДУПРЕЖДЕНИЕ: Недостаточно данных ({len(metrics_timeline)} точек) для анализа согласованности во времени. Требуется минимум 2 точки.{Colors.RESET}")
-                return {"consistent": True, "reason": "Недостаточно данных"}
-            
-            consistency_results = {}
-            
-            # Анализ каждой метрики
-            all_metrics = set()
-            for metrics in metrics_timeline:
-                all_metrics.update(metrics.keys())
-            
-            for metric_name in all_metrics:
-                values = []
-                for metrics in metrics_timeline:
-                    if metric_name in metrics:
-                        values.append(metrics[metric_name])
+            for i, name in enumerate(metric_names):
+                values = metrics_matrix[:, i]
                 
-                if len(values) < 2:
-                    logger.debug(f"Для метрики '{metric_name}' недостаточно точек для анализа тренда. Пропускаем.")
-                    continue
-                
-                values_array = np.array(values)
-                
-                # Coefficient of variation
-                mean_val = np.mean(values_array)
-                std_val = np.std(values_array)
-                cv = std_val / (mean_val + 1e-8)
-                
-                # Trend analysis
+                # Простой линейный тренд
                 x = np.arange(len(values))
-                slope, intercept, r_value, p_value, std_err = stats.linregress(x, values_array)
+                correlation = np.corrcoef(x, values)[0, 1]
                 
-                # Outlier detection (Z-score > 2.5)
-                z_scores = np.abs(stats.zscore(values_array))
-                outliers = np.sum(z_scores > 2.5)
-                
-                consistency_results[metric_name] = {
-                    "coefficient_of_variation": float(cv),
-                    "trend_slope": float(slope),
-                    "trend_r_squared": float(r_value ** 2),
-                    "trend_p_value": float(p_value),
-                    "outliers_count": int(outliers),
-                    "consistent": cv < 0.3 and outliers <= 1,  # Пороги согласованности
-                    "values_count": len(values)
-                }
+                if correlation > 0.3:
+                    trends[name] = 'increasing'
+                elif correlation < -0.3:
+                    trends[name] = 'decreasing'
+                else:
+                    trends[name] = 'stable'
             
-            # Общая согласованность
-            consistent_metrics = [result["consistent"] for result in consistency_results.values()]
-            overall_consistency = np.mean(consistent_metrics) if consistent_metrics else 1.0
-            
-            result = {
-                "overall_consistency": float(overall_consistency),
-                "consistent": overall_consistency >= 0.7,
-                "metrics_analysis": consistency_results,
-                "total_metrics": len(consistency_results),
-                "consistent_metrics": sum(consistent_metrics)
-            }
-            
-            logger.info(f"{Colors.GREEN}✔ Проверка согласованности завершена. Общая согласованность: {overall_consistency:.3f}{Colors.RESET}")
-            return result
+            return trends
             
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при валидации согласованности метрик во времени: {e}{Colors.RESET}")
-            return {"consistent": False, "reason": f"Ошибка: {str(e)}"}
+            logger.error(f"Ошибка анализа трендов: {e}")
+            return {}
 
-    def get_metrics_statistics(self) -> Dict[str, Any]:
-        """Получение статистики вычислений"""
-        logger.info(f"{Colors.CYAN}Получение статистики MetricsCalculator...{Colors.RESET}")
-        stats = {
-            "calculation_stats": self.calculation_stats.copy(),
-            "cache_size": len(self.metrics_cache),
-            "supported_metrics": ALL_IDENTITY_METRICS.copy(),
-            "metrics_groups": IDENTITY_METRICS_GROUPS.copy()
+    def create_baseline_from_metrics(self, metrics_list: List[IdentityMetrics], 
+                                   baseline_name: str, pose_category: str = "frontal"):
+        """
+        Создание baseline метрик из списка образцов
+        
+        Args:
+            metrics_list: Список метрик для создания baseline
+            baseline_name: Имя baseline
+            pose_category: Категория позы
+        """
+        try:
+            if len(metrics_list) < 5:
+                logger.warning("Недостаточно образцов для создания надежного baseline")
+            
+            # Конвертация в матрицу
+            metrics_matrix = np.array([m.to_array() for m in metrics_list])
+            
+            # Расчет статистики
+            means = np.mean(metrics_matrix, axis=0)
+            stds = np.std(metrics_matrix, axis=0)
+            
+            metric_names = SKULL_METRICS + PROPORTION_METRICS
+            
+            # Создание baseline объекта
+            baseline = BaselineMetrics(
+                reference_period=baseline_name,
+                mean_values={name: float(mean) for name, mean in zip(metric_names, means)},
+                std_values={name: float(std) for name, std in zip(metric_names, stds)},
+                sample_count=len(metrics_list),
+                creation_date=datetime.datetime.now(),
+                confidence_level=min(1.0, len(metrics_list) / 20.0)  # Максимальная уверенность при 20+ образцах
+            )
+            
+            # Сохранение в кэш
+            baseline_key = f"baseline_{pose_category}"
+            self.baseline_cache[baseline_key] = baseline
+            
+            # Сохранение на диск
+            self._save_baseline_metrics()
+            
+            logger.info(f"Создан baseline '{baseline_name}' для позы '{pose_category}' из {len(metrics_list)} образцов")
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания baseline: {e}")
+
+    def _save_baseline_metrics(self):
+        """Сохранение baseline метрик на диск"""
+        try:
+            baseline_path = self.cache_dir / "baseline_metrics.pkl"
+            with open(baseline_path, 'wb') as f:
+                pickle.dump(self.baseline_cache, f)
+            logger.debug("Baseline метрики сохранены")
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения baseline метрик: {e}")
+
+    def get_processing_statistics(self) -> Dict[str, Any]:
+        """
+        Получение статистики обработки
+        
+        Returns:
+            Словарь со статистикой
+        """
+        stats = self.processing_stats.copy()
+        
+        if stats['total_calculated'] > 0:
+            stats['success_rate'] = stats['successful_calculations'] / stats['total_calculated']
+            stats['cache_hit_rate'] = stats['cache_hits'] / stats['total_calculated']
+        else:
+            stats['success_rate'] = 0.0
+            stats['cache_hit_rate'] = 0.0
+        
+        # Информация о кэше
+        stats['cache_info'] = {
+            'metrics_cached': len(self.metrics_cache),
+            'baselines_loaded': len(self.baseline_cache)
         }
-        logger.info(f"{Colors.GREEN}✔ Статистика MetricsCalculator получена.{Colors.RESET}")
+        
+        # Информация о памяти
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        stats['memory_usage_mb'] = memory_info.rss / (1024 * 1024)
+        
         return stats
 
-    def clear_cache(self) -> None:
-        """Очистка кэша вычислений"""
-        self.metrics_cache.clear()
-        logger.info(f"{Colors.YELLOW}Кэш вычислений метрик очищен.{Colors.RESET}")
-
-    def save_baseline_metrics(self, baseline_file: str = "metrics_baselines.json") -> None:
-        """Сохранение базовых линий метрик"""
+    def clear_cache(self):
+        """Очистка кэша метрик"""
         try:
-            baseline_path = CACHE_DIR / baseline_file
-            CACHE_DIR.mkdir(exist_ok=True)
-            
-            with open(baseline_path, 'w', encoding='utf-8') as f:
-                json.dump(self.baseline_metrics, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"{Colors.GREEN}✔ Базовые линии метрик сохранены в: {baseline_path}{Colors.RESET}")
+            self.metrics_cache.clear()
+            logger.info("Кэш метрик очищен")
             
         except Exception as e:
-            logger.error(f"{Colors.RED}ОШИБКА при сохранении базовых линий метрик: {e}{Colors.RESET}")
+            logger.error(f"Ошибка очистки кэша: {e}")
 
-    def self_test(self) -> None:
-        """Самотестирование модуля"""
-        logger.info(f"{Colors.BOLD}\n=== Запуск самотестирования MetricsCalculator ==={Colors.RESET}")
+    def export_metrics_to_csv(self, metrics_list: List[IdentityMetrics], output_path: str):
+        """
+        Экспорт метрик в CSV файл
         
+        Args:
+            metrics_list: Список метрик для экспорта
+            output_path: Путь для сохранения CSV
+        """
         try:
-            # Генерация тестовых ландмарок
-            test_landmarks = np.random.rand(68, 3) * 100
-            logger.info("Генерация тестовых 3D ландмарок для проверки...")
+            import pandas as pd
             
-            # Тест расчета метрик
-            metrics_result = self.calculate_identity_signature_metrics(test_landmarks, pose_category="test_pose")
-            logger.info(f"Тест расчета метрик: успешно извлечено {len(metrics_result.get('raw_metrics', {}))} метрик.")
-            if len(metrics_result.get('raw_metrics', {})) == 15: # Ожидаем 15 метрик
-                logger.info(f"{Colors.GREEN}✔ Расчет всех 15 метрик: ПРОЙДЕН.{Colors.RESET}")
-            else:
-                logger.error(f"{Colors.RED}✖ Расчет метрик: ПРОВАЛЕН. Ожидалось 15, получено {len(metrics_result.get('raw_metrics', {}))}.{Colors.RESET}")
+            # Подготовка данных
+            data = []
+            for metrics in metrics_list:
+                row = {
+                    'image_id': metrics.image_id,
+                    'filepath': metrics.filepath,
+                    'pose_category': metrics.pose_category,
+                    'confidence_score': metrics.confidence_score,
+                    'processing_time_ms': metrics.processing_time_ms
+                }
+                
+                # Добавление всех метрик
+                for metric_name in SKULL_METRICS + PROPORTION_METRICS:
+                    row[metric_name] = getattr(metrics, metric_name, 0.0)
+                
+                data.append(row)
             
-            # Тест схожести метрик
-            metrics1 = metrics_result.get('normalized_metrics', {})
-            metrics2 = {k: v + np.random.normal(0, 0.02) for k, v in metrics1.items()} # Небольшие изменения для схожести
+            # Создание DataFrame и сохранение
+            df = pd.DataFrame(data)
+            df.to_csv(output_path, index=False)
             
-            similarity = self.calculate_metrics_similarity(metrics1, metrics2)
-            logger.info(f"Тест схожести метрик: Общая схожесть: {similarity['similarity']:.3f}")
-            if similarity['similarity'] > 0.8: # Ожидаем высокую схожесть
-                logger.info(f"{Colors.GREEN}✔ Тест схожести метрик: ПРОЙДЕН (высокая схожесть).{Colors.RESET}")
-            else:
-                logger.error(f"{Colors.RED}✖ Тест схожести метрик: ПРОВАЛЕН (низкая схожесть).{Colors.RESET}")
+            logger.info(f"Метрики экспортированы в {output_path}")
             
-            # Тест согласованности
-            timeline = [
-                metrics1,
-                {k: v + np.random.normal(0, 0.01) for k, v in metrics1.items()},
-                {k: v + np.random.normal(0, 0.02) for k, v in metrics1.items()}
-            ]
-            consistency = self.validate_metrics_consistency(timeline)
-            logger.info(f"Тест согласованности метрик во времени: Общая согласованность: {consistency['overall_consistency']:.3f}")
-            if consistency['overall_consistency'] >= 0.7: # Ожидаем хорошую согласованность
-                logger.info(f"{Colors.GREEN}✔ Тест согласованности метрик: ПРОЙДЕН (высокая согласованность).{Colors.RESET}")
-            else:
-                logger.error(f"{Colors.RED}✖ Тест согласованности метрик: ПРОВАЛЕН (низкая согласованность).{Colors.RESET}")
-            
-            # Статистика
-            stats = self.get_metrics_statistics()
-            logger.info(f"{Colors.CYAN}Статистика MetricsCalculator после теста: {Colors.RESET}")
-            logger.info(f"  Всего вычислений: {stats['calculation_stats']['total_calculations']}")
-            logger.info(f"  Успешно: {stats['calculation_stats']['successful_calculations']}")
-            logger.info(f"  Ошибок: {stats['calculation_stats']['failed_calculations']}")
-            logger.info(f"  Попаданий в кэш: {stats['calculation_stats']['cache_hits']}")
-            logger.info(f"  Размер кэша: {stats['cache_size']}")
-            
+        except ImportError:
+            logger.error("Pandas не установлен, экспорт в CSV недоступен")
         except Exception as e:
-            logger.critical(f"{Colors.RED}КРИТИЧЕСКАЯ ОШИБКА при самотестировании MetricsCalculator: {e}{Colors.RESET}")
-        
-        logger.info(f"{Colors.BOLD}=== Самотестирование MetricsCalculator завершено ==={Colors.RESET}\n")
+            logger.error(f"Ошибка экспорта в CSV: {e}")
 
-# ==================== ТОЧКА ВХОДА ====================
+# === ФУНКЦИИ САМОТЕСТИРОВАНИЯ ===
+
+def self_test():
+    """Самотестирование модуля metrics_calculator"""
+    try:
+        logger.info("Запуск самотестирования metrics_calculator...")
+        
+        # Создание экземпляра калькулятора
+        calculator = MetricsCalculator()
+        
+        # Создание тестовых ландмарков
+        test_landmarks = np.random.rand(68, 3) * 100
+        
+        # Создание тестового пакета ландмарков
+        class MockLandmarksPackage:
+            def __init__(self):
+                self.image_id = "test_image"
+                self.filepath = "test.jpg"
+                self.normalized_landmarks = test_landmarks
+                self.pose_category = "frontal"
+        
+        test_package = MockLandmarksPackage()
+        
+        # Тест расчета метрик
+        metrics = calculator.calculate_identity_signature_metrics(test_package)
+        assert metrics is not None, "Метрики не рассчитаны"
+        assert len(metrics.to_array()) == 15, "Неверное количество метрик"
+        
+        # Тест сравнения метрик
+        metrics2 = calculator.calculate_identity_signature_metrics(test_package)
+        comparison = calculator.compare_metrics(metrics, metrics2)
+        assert comparison.similarity_score > 0.9, "Идентичные метрики должны быть похожи"
+        
+        # Тест анализа консистентности
+        metrics_list = [metrics, metrics2]
+        consistency = calculator.analyze_metrics_consistency(metrics_list)
+        assert 'overall_consistency' in consistency, "Отсутствует анализ консистентности"
+        
+        # Тест статистики
+        stats = calculator.get_processing_statistics()
+        assert 'success_rate' in stats, "Отсутствует статистика"
+        
+        logger.info("Самотестирование metrics_calculator завершено успешно")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка самотестирования: {e}")
+        return False
+
+# === ИНИЦИАЛИЗАЦИЯ ===
 
 if __name__ == "__main__":
-    calculator = MetricsCalculator()
-    calculator.self_test()
+    # Запуск самотестирования при прямом вызове модуля
+    success = self_test()
+    if success:
+        print("✅ Модуль metrics_calculator работает корректно")
+        
+        # Демонстрация основной функциональности
+        calculator = MetricsCalculator()
+        print(f"📊 Метрик в кэше: {len(calculator.metrics_cache)}")
+        print(f"🔧 Baseline загружено: {len(calculator.baseline_cache)}")
+        print(f"📏 Костных метрик: {len(SKULL_METRICS)}")
+        print(f"📐 Пропорциональных метрик: {len(PROPORTION_METRICS)}")
+        print(f"💾 Кэш-директория: {calculator.cache_dir}")
+    else:
+        print("❌ Обнаружены ошибки в модуле metrics_calculator")
+        exit(1)

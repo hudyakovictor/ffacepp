@@ -1,683 +1,923 @@
-"""
-EmbeddingAnalyzer - Анализатор эмбеддингов лиц с кластеризацией и аномалиями
-Версия: 2.0
-Дата: 2025-06-15
-Исправлены все критические ошибки согласно правкам
-"""
-
+# embedding_analyzer.py
+import os
+import json
+import logging
+import hashlib
+import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any, Union
+from dataclasses import dataclass, field, asdict
 import numpy as np
 import cv2
+from PIL import Image
 import torch
-import torch.nn.functional as F
-from sklearn.cluster import DBSCAN
-from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
-from scipy.spatial.distance import pdist, squareform
-from typing import Dict, List, Tuple, Optional, Any, Union
-import logging
-from datetime import datetime, timedelta
-import os
-import pickle
-from pathlib import Path
+import torch.nn as nn
 import onnxruntime as ort
-from insightface.utils import face_align
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
+from scipy.spatial.distance import cosine, euclidean
+from scipy.stats import zscore
+import pickle
+import time
+import psutil
+from functools import lru_cache
+import threading
+from collections import OrderedDict, defaultdict
+import msgpack
+
+from core_config import get_config
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/embeddinganalyzer.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
-# Проверка доступности InsightFace
-try:
-    from insightface.app import FaceAnalysis
-    HAS_INSIGHTFACE = True
-    logger.info("InsightFace успешно импортирован.")
-except ImportError:
-    HAS_INSIGHTFACE = False
-    logger.warning("InsightFace не установлен. Функции, зависящие от него, будут недоступны.")
+# === КОНСТАНТЫ И КОНФИГУРАЦИЯ ===
 
-# Импорт конфигурации
-try:
-    from core_config import (
-        DBSCAN_PARAMS, EMBEDDING_ANALYSIS_THRESHOLDS, AUTHENTICITY_WEIGHTS,
-        AGING_MODEL, CRITICAL_THRESHOLDS, get_chronological_analysis_parameters,
-        CACHE_DIR, ERROR_CODES
-    )
-    logger.info("Конфигурация успешно импортирована")
-except ImportError as e:
-    logger.error(f"Ошибка импорта конфигурации: {e}")
-    # Значения по умолчанию
-    DBSCAN_PARAMS = {"epsilon": 0.35, "min_samples": 3, "metric": "cosine"}
-    EMBEDDING_ANALYSIS_THRESHOLDS = {
-        "dimension_anomaly_threshold": 2.5,
-        "texture_anomaly_dims": (45, 67),
-        "geometric_anomaly_dims": (120, 145),
-        "lighting_anomaly_dims": (200, 230),
-        "age_corrected_drift_enabled": True
-    }
-    AUTHENTICITY_WEIGHTS = {"embedding": 0.30, "temporal_consistency": 0.15, "temporal_stability": 0.10}
-    AGING_MODEL = {"elasticity_loss_per_year": 0.015}
-    CRITICAL_THRESHOLDS = {"min_confidence_threshold": 0.5}
-    CACHE_DIR = Path("cache")
-    ERROR_CODES = {"E004": "EMBEDDING_EXTRACTION_FAILED", "E005": "CLUSTERING_FAILED"}
+# Размеры для InsightFace
+INSIGHTFACE_INPUT_SIZE = (112, 112)
+EMBEDDING_DIMENSION = 512
 
-# ==================== ОСНОВНОЙ КЛАСС ====================
+# Параметры DBSCAN для кластеризации
+DBSCAN_EPS = 0.35
+DBSCAN_MIN_SAMPLES = 3
+DBSCAN_METRIC = 'cosine'
+
+# Пороги для валидации эмбеддингов
+EMBEDDING_DISTANCE_THRESHOLD = 0.35
+CLUSTER_CONFIDENCE_THRESHOLD = 0.7
+OUTLIER_THRESHOLD = 0.5
+
+# Параметры предобработки для InsightFace
+ARCFACE_SRC = np.array([
+    [30.2946, 51.6963],
+    [65.5318, 51.5014],
+    [48.0252, 71.7366],
+    [33.5493, 92.3655],
+    [62.7299, 92.2041]
+], dtype=np.float32)
+
+# === СТРУКТУРЫ ДАННЫХ ===
+
+@dataclass
+class EmbeddingPackage:
+    """Пакет данных с эмбеддингом лица"""
+    image_id: str
+    filepath: str
+    embedding_vector: np.ndarray  # 512-мерный вектор
+    extraction_confidence: float
+    
+    # Кластерная информация
+    cluster_id: int = -1
+    cluster_confidence: float = 0.0
+    is_outlier: bool = False
+    
+    # Метрики качества
+    alignment_quality: float = 0.0
+    face_quality_score: float = 0.0
+    
+    # Статистика расстояний
+    nearest_neighbor_distance: float = float('inf')
+    mean_cluster_distance: float = float('inf')
+    
+    # Метаданные обработки
+    processing_time_ms: float = 0.0
+    model_version: str = "w600k_r50"
+    device_used: str = "cpu"
+    
+    # Флаги качества
+    quality_flags: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+@dataclass
+class ClusterManifest:
+    """Манифест кластера идентичности"""
+    cluster_id: int
+    center_embedding: np.ndarray
+    member_count: int
+    first_appearance: datetime.date
+    last_appearance: datetime.date
+    
+    # Статистика кластера
+    intra_cluster_variance: float
+    cluster_radius: float
+    stability_score: float
+    
+    # Временные характеристики
+    appearance_gaps: List[int]  # дни между появлениями
+    total_timespan_days: int
+    
+    # Качество кластера
+    silhouette_score: float
+    cohesion_score: float
+    
+    # Список участников
+    member_image_ids: List[str] = field(default_factory=list)
+
+@dataclass
+class IdentityTimeline:
+    """Временная линия появления идентичностей"""
+    clusters: Dict[int, ClusterManifest]
+    total_identities: int
+    date_range: Tuple[datetime.date, datetime.date]
+    
+    # Статистика переключений
+    identity_switches: List[Dict[str, Any]]
+    switch_frequency: float
+    
+    # Анализ паттернов
+    dominant_identity: int
+    identity_distribution: Dict[int, float]
+
+# === ОСНОВНОЙ КЛАСС АНАЛИЗАТОРА ЭМБЕДДИНГОВ ===
 
 class EmbeddingAnalyzer:
-    """
-    Анализатор эмбеддингов лиц с кластеризацией и аномалиями
-    Версия: 2.0
-    Дата: 2025-06-15
-    Исправлены все критические ошибки согласно правкам
-    """
+    """Анализатор для извлечения и кластеризации эмбеддингов лиц"""
     
-    def __init__(self, face_app: Any = None):
-        """Инициализация анализатора эмбеддингов"""
-        logger.info("Инициализация EmbeddingAnalyzer")
+    def __init__(self):
+        self.config = get_config()
+        self.cache_dir = Path("./cache/embedding_analyzer")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # InsightFace модель - теперь она может быть передана извне
-        self.face_app = face_app
+        # Модели
+        self.insightface_session = None
+        self.scaler = StandardScaler()
         
-        # Кэш эмбеддингов
-        self.embeddings_cache = {}
+        # Кэш результатов
+        self.embedding_cache: Dict[str, EmbeddingPackage] = {}
+        self.cluster_cache: Dict[str, ClusterManifest] = {}
         
-        # Кэш кластеризации
-        self.clustering_cache = {}
+        # Статистика
+        self.processing_stats = {
+            'total_processed': 0,
+            'successful_extractions': 0,
+            'failed_extractions': 0,
+            'cache_hits': 0,
+            'clusters_created': 0
+        }
         
-        # Устройство вычислений
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # Блокировка для потокобезопасности
+        self.extraction_lock = threading.Lock()
         
-        # Флаг инициализации - теперь зависит от face_app
-        self.init_done = (self.face_app is not None)
-        
-        # Если face_app не передан, инициализируем его здесь (для автономной работы или тестов)
-        if self.face_app is None and HAS_INSIGHTFACE:
-            self.initialize_insightface_model()
-        elif self.face_app is None and not HAS_INSIGHTFACE:
-            logger.warning("InsightFace недоступен, используется заглушка")
+        # Инициализация модели
+        self._initialize_insightface_model()
         
         logger.info("EmbeddingAnalyzer инициализирован")
 
-    def initialize_insightface_model(self) -> None:
-        """
-        ИСПРАВЛЕНО: Инициализация InsightFace модели Buffalo-L
-        Согласно правкам: правильная инициализация с error handling
-        """
-        if self.face_app is not None: # Check if already initialized inside this instance
-            logger.info("InsightFace уже инициализирован")
-            return
-
-        if not HAS_INSIGHTFACE:
-            logger.error("InsightFace компоненты недоступны")
-            return
-
+    def _initialize_insightface_model(self):
+        """Инициализация модели InsightFace"""
         try:
-            logger.info("Начало инициализации InsightFace Buffalo-L")
+            model_path = self.config.get_model_path("insightface")
             
-            # Local import to avoid circular dependencies if FaceAnalysis is not used globally
-            from insightface.app import FaceAnalysis 
-
-            providers = ['CUDAExecutionProvider'] if ort.get_device()=="GPU" else ['CPUExecutionProvider']
-            self.face_app = FaceAnalysis(name='buffalo_l', providers=providers)
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Модель InsightFace не найдена: {model_path}")
             
-            # Подготовка модели
-            ctx_id = 0 
-            det_size = (640, 640)
+            # Настройка провайдеров для ONNX Runtime
+            providers = []
             
-            self.face_app.prepare(ctx_id=ctx_id, det_size=det_size)
+            # Проверка доступности MPS (Apple Silicon)
+            if torch.backends.mps.is_available():
+                providers.append('CPUExecutionProvider')  # MPS пока не поддерживается ONNX Runtime
+                logger.info("Используется CPU провайдер (MPS не поддерживается ONNX Runtime)")
+            else:
+                providers.append('CPUExecutionProvider')
             
-            self.init_done = True
-            logger.info("InsightFace Buffalo-L успешно инициализирован")
+            # Создание сессии ONNX Runtime
+            self.insightface_session = ort.InferenceSession(
+                model_path,
+                providers=providers
+            )
+            
+            # Проверка входных и выходных размерностей
+            input_shape = self.insightface_session.get_inputs()[0].shape
+            output_shape = self.insightface_session.get_outputs()[0].shape
+            
+            logger.info(f"InsightFace модель загружена: {input_shape} -> {output_shape}")
             
         except Exception as e:
             logger.error(f"Ошибка инициализации InsightFace: {e}")
-            self.face_app = None
-            self.init_done = False
-            raise # Re-raise if initialization fails
+            raise
 
-    def extract_512d_face_embedding(self, img_full: np.ndarray, insight_app: Any) -> Tuple[Optional[np.ndarray], float]:
+    def extract_512d_face_embedding(self, image: np.ndarray, 
+                                  landmarks: np.ndarray) -> Optional[EmbeddingPackage]:
         """
-        ИСПРАВЛЕНО: Извлечение 512D эмбеддинга лица с confidence
-        Теперь: сохраняем выровненное лицо (face_aligned.jpg) для отладки, логируем shape/dtype ландмарок, временно снижаем порог уверенности до 0.3.
+        Извлечение 512-мерного эмбеддинга лица
+        
+        Args:
+            image: Входное изображение
+            landmarks: 68-точечные ландмарки лица
+            
+        Returns:
+            Пакет с эмбеддингом или None при ошибке
         """
-        if not self.init_done:
-            if HAS_INSIGHTFACE:
-                pass
-            else:
-                logger.error("InsightFace не инициализирован и недоступен")
-                return None, 0.0
-        if insight_app is None:
-            logger.error("InsightFace модель не инициализирована")
-            return None, 0.0
         try:
-            logger.info(f"Извлечение 512D эмбеддинга из изображения {img_full.shape}")
-            faces = insight_app.get(img_full, max_num=1)
-            if len(faces) == 0:
-                logger.warning("InsightFace не обнаружил лица в изображении")
-                return None, 0.0
-            best_face = max(faces, key=lambda x: self._get_face_score(x))
-            if best_face is None:
-                logger.error("InsightFace не смог выбрать лучшее лицо")
-                return None, 0.0
-            # --- ЛОГИРУЕМ ЛАНДМАРКИ ---
-            if hasattr(best_face, 'kps') and best_face.kps is not None:
-                logger.info(f"[DEBUG] Ландмарки для выравнивания: shape={best_face.kps.shape}, dtype={best_face.kps.dtype}")
-            else:
-                logger.warning("[DEBUG] Ландмарки отсутствуют или None!")
-            # --- СОХРАНЯЕМ ВЫРОВНЕННОЕ ЛИЦО ---
-            try:
-                if hasattr(best_face, 'kps') and best_face.kps is not None:
-                    face_aligned = face_align.norm_crop(img_full, landmark=best_face.kps, image_size=112)
-                    cv2.imwrite("aligned_face.jpg", face_aligned)
-                    logger.info("[DEBUG] Выровненное лицо сохранено как aligned_face.jpg")
-                else:
-                    logger.warning("[DEBUG] Выровненное лицо не сохранено: нет ландмарок.")
-            except Exception as e:
-                logger.warning(f"[DEBUG] Ошибка при сохранении выровненного лица: {e}")
-            # --- ПРОДОЛЖАЕМ СТАНДАРТНО ---
-            if not hasattr(best_face, 'embedding') or best_face.embedding is None:
-                detected_kps_count = 0
-                if hasattr(best_face, 'kps') and best_face.kps is not None:
-                    detected_kps_count = best_face.kps.shape[0]
-                if detected_kps_count == 0:
-                    logger.error(f"InsightFace обнаружил лицо, но не смог извлечь 68 ключевых точек (ландмарок), необходимых для выравнивания и последующего вычисления эмбеддинга. Получено 0 ландмарок. Возможно, изображение слишком низкого качества или лицо сильно повернуто/заслонено.")
-                else:
-                    logger.error(f"InsightFace не содержит embedding. Доступные атрибуты: {dir(best_face)}. Возможно, проблема с внутренней обработкой InsightFace.")
-                return None, 0.0
-            emb = best_face.embedding.astype("float32")
-            emb_normalized = emb / np.linalg.norm(emb)
-            confidence = self._get_face_score(best_face)
-            if emb_normalized.shape[0] != 512:
-                logger.warning(f"Неожиданная размерность эмбеддинга: {emb_normalized.shape}")
-            logger.info(f"Эмбеддинг извлечен успешно. Shape: {emb_normalized.shape}, confidence: {confidence}")
-            # --- ВРЕМЕННО СНИЖАЕМ ПОРОГ УВЕРЕННОСТИ ДО 0.3 ---
-            if confidence < 0.3:
-                logger.warning(f"[DEBUG] Уверенность эмбеддинга ниже 0.3: {confidence:.3f}. Эмбеддинг возвращается, но будет отфильтрован на следующем этапе.")
-            return emb_normalized, confidence
+            start_time = time.time()
+            
+            # Генерация ID изображения
+            image_bytes = cv2.imencode('.jpg', image)[1].tobytes()
+            image_id = hashlib.sha256(image_bytes).hexdigest()
+            
+            # Проверка кэша
+            if image_id in self.embedding_cache:
+                self.processing_stats['cache_hits'] += 1
+                cached_result = self.embedding_cache[image_id]
+                cached_result.processing_time_ms = (time.time() - start_time) * 1000
+                return cached_result
+            
+            # Извлечение 5 ключевых точек из 68-точечной модели
+            key_points = self._extract_5_keypoints(landmarks)
+            
+            # Аффинное выравнивание лица
+            aligned_face, alignment_quality = self._align_face(image, key_points)
+            
+            if aligned_face is None:
+                logger.warning("Не удалось выровнять лицо")
+                self.processing_stats['failed_extractions'] += 1
+                return None
+            
+            # Предобработка для InsightFace
+            preprocessed = self._preprocess_for_insightface(aligned_face)
+            
+            # Извлечение эмбеддинга
+            embedding_vector = self._run_insightface_inference(preprocessed)
+            
+            if embedding_vector is None:
+                logger.error("Не удалось извлечь эмбеддинг")
+                self.processing_stats['failed_extractions'] += 1
+                return None
+            
+            # Нормализация эмбеддинга
+            embedding_vector = self._normalize_embedding(embedding_vector)
+            
+            # Оценка качества лица
+            face_quality_score = self._assess_face_quality(aligned_face)
+            
+            # Расчет достоверности извлечения
+            extraction_confidence = self._calculate_extraction_confidence(
+                alignment_quality, face_quality_score
+            )
+            
+            # Создание пакета
+            package = EmbeddingPackage(
+                image_id=image_id,
+                filepath="",  # Будет заполнено вызывающей функцией
+                embedding_vector=embedding_vector,
+                extraction_confidence=extraction_confidence,
+                alignment_quality=alignment_quality,
+                face_quality_score=face_quality_score,
+                processing_time_ms=(time.time() - start_time) * 1000,
+                device_used="cpu"
+            )
+            
+            # Валидация результата
+            self._validate_embedding_package(package)
+            
+            # Сохранение в кэш
+            self.embedding_cache[image_id] = package
+            
+            self.processing_stats['successful_extractions'] += 1
+            self.processing_stats['total_processed'] += 1
+            
+            logger.debug(f"Эмбеддинг извлечен за {package.processing_time_ms:.1f}мс")
+            return package
+            
         except Exception as e:
-            logger.error(f"Ошибка извлечения эмбеддинга: {e}", exc_info=True)
+            logger.error(f"Ошибка извлечения эмбеддинга: {e}")
+            self.processing_stats['failed_extractions'] += 1
+            self.processing_stats['total_processed'] += 1
+            return None
+
+    def _extract_5_keypoints(self, landmarks_68: np.ndarray) -> np.ndarray:
+        """Извлечение 5 ключевых точек из 68-точечной модели"""
+        try:
+            # Индексы для 5 ключевых точек InsightFace
+            # Левый глаз, правый глаз, нос, левый угол рта, правый угол рта
+            left_eye = np.mean(landmarks_68[42:48, :2], axis=0)  # Левый глаз
+            right_eye = np.mean(landmarks_68[36:42, :2], axis=0)  # Правый глаз
+            nose = landmarks_68[30, :2]  # Кончик носа
+            left_mouth = landmarks_68[48, :2]  # Левый угол рта
+            right_mouth = landmarks_68[54, :2]  # Правый угол рта
+            
+            keypoints = np.array([
+                left_eye, right_eye, nose, left_mouth, right_mouth
+            ], dtype=np.float32)
+            
+            return keypoints
+            
+        except Exception as e:
+            logger.error(f"Ошибка извлечения ключевых точек: {e}")
+            raise
+
+    def _align_face(self, image: np.ndarray, keypoints: np.ndarray) -> Tuple[Optional[np.ndarray], float]:
+        """Аффинное выравнивание лица по 5 ключевым точкам"""
+        try:
+            # Расчет трансформационной матрицы
+            tform = cv2.estimateAffinePartial2D(keypoints, ARCFACE_SRC)[0]
+            
+            if tform is None:
+                logger.warning("Не удалось вычислить трансформационную матрицу")
+                return None, 0.0
+            
+            # Применение трансформации
+            aligned = cv2.warpAffine(
+                image, tform, INSIGHTFACE_INPUT_SIZE, 
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0
+            )
+            
+            # Оценка качества выравнивания
+            alignment_quality = self._assess_alignment_quality(keypoints, tform)
+            
+            return aligned, alignment_quality
+            
+        except Exception as e:
+            logger.error(f"Ошибка выравнивания лица: {e}")
             return None, 0.0
 
-    def _get_face_score(self, face) -> float:
-        """Получение score лица из InsightFace API"""
+    def _assess_alignment_quality(self, keypoints: np.ndarray, tform: np.ndarray) -> float:
+        """Оценка качества выравнивания"""
         try:
-            # Попытка получить detection score
-            return getattr(face, 'det_score', getattr(face, 'score', 0.0))
+            # Применение трансформации к ключевым точкам
+            keypoints_homogeneous = np.hstack([keypoints, np.ones((len(keypoints), 1))])
+            transformed_keypoints = (tform @ keypoints_homogeneous.T).T
+            
+            # Расчет расстояний до эталонных точек
+            distances = np.linalg.norm(transformed_keypoints - ARCFACE_SRC, axis=1)
+            mean_distance = np.mean(distances)
+            
+            # Нормализация качества (чем меньше расстояние, тем лучше)
+            quality = max(0.0, 1.0 - mean_distance / 10.0)
+            
+            return float(quality)
+            
         except Exception as e:
-            logger.error(f"Ошибка получения face score: {e}")
+            logger.error(f"Ошибка оценки качества выравнивания: {e}")
             return 0.0
 
-    def perform_identity_clustering(self, embeddings_with_metadata: List[Dict], 
-                                  epsilon: Optional[float] = None, 
-                                  min_samples: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Кластеризация идентичностей с DBSCAN (исправлено: eps=0.35, min_samples=3, metric='cosine', возвращает все нужные поля)
-        """
-        if not embeddings_with_metadata:
-            logger.warning("perform_identity_clustering: Пустой список эмбеддингов")
-            return self._get_empty_clustering_result()
-        if not isinstance(embeddings_with_metadata, list):
-            logger.error(f"perform_identity_clustering: Неверный тип данных, ожидается list, получен {type(embeddings_with_metadata)}")
-            return self._get_empty_clustering_result()
-        logger.info(f"Кластеризация {len(embeddings_with_metadata)} эмбеддингов")
+    def _preprocess_for_insightface(self, image: np.ndarray) -> np.ndarray:
+        """Предобработка изображения для InsightFace"""
         try:
-            valid_embeddings_and_metadata = []
-            for i, item in enumerate(embeddings_with_metadata):
-                if not isinstance(item, dict):
-                    continue
-                if 'embedding' not in item:
-                    continue
-                embedding = item.get('embedding')
-                if isinstance(embedding, np.ndarray) and embedding.ndim == 1 and embedding.size == 512:
-                    valid_embeddings_and_metadata.append(item)
-            if not valid_embeddings_and_metadata:
-                return self._get_empty_clustering_result()
-            embeddings_array = np.array([item['embedding'] for item in valid_embeddings_and_metadata])
-            norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
-            embeddings_array = embeddings_array / (norms + 1e-8)
-            if embeddings_array.shape[0] < 2:
-                return {
-                    "labels": np.array([0] * len(valid_embeddings_and_metadata)),
-                    "n_clusters": 1,
-                    "unique_clusters": [0],
-                    "outlier_ratio": 0.0,
-                    "cluster_centers": np.array([embeddings_array[0]]),
-                    "cluster_std": np.array([0.0]),
-                    "outliers": [],
-                    "confidence_scores": np.ones(len(valid_embeddings_and_metadata)),
-                }
-            eps_val = epsilon if epsilon is not None else 0.35
-            min_samples_val = min_samples if min_samples is not None else 3
-            db = DBSCAN(eps=eps_val, min_samples=min_samples_val, metric='cosine')
-            cluster_labels = db.fit_predict(embeddings_array)
-            unique_clusters = [lbl for lbl in np.unique(cluster_labels) if lbl != -1]
-            n_clusters = len(unique_clusters)
-            centers, stds, confs = [], [], np.zeros(len(embeddings_array), np.float32)
-            for cid in unique_clusters:
-                mask = cluster_labels == cid
-                cluster_embs = embeddings_array[mask]
-                center = cluster_embs.mean(0)
-                std = cluster_embs.std(0).mean()
-                centers.append(center)
-                stds.append(std)
-                from scipy.spatial.distance import pdist
-                intra = pdist(cluster_embs, 'cosine')
-                mean_intra = intra.mean() if len(intra) else 0
-                confs[mask] = 1 - np.clip(mean_intra / eps_val, 0, 1)
-            outliers = np.where(cluster_labels == -1)[0]
-            return {
-                "labels": cluster_labels.tolist(),
-                "n_clusters": n_clusters,
-                "unique_clusters": unique_clusters,
-                "outlier_ratio": float(np.sum(cluster_labels == -1) / len(cluster_labels)) if len(cluster_labels) > 0 else 0.0,
-                "cluster_centers": np.vstack(centers) if centers else np.empty((0,512)),
-                "cluster_std": np.array(stds),
-                "outliers": outliers.tolist(),
-                "confidence_scores": confs.tolist(),
-            }
+            # Конвертация в RGB если нужно
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            # Нормализация к диапазону [0, 1]
+            image = image.astype(np.float32) / 255.0
+            
+            # Нормализация по каналам (ImageNet статистика)
+            mean = np.array([0.5, 0.5, 0.5])
+            std = np.array([0.5, 0.5, 0.5])
+            
+            image = (image - mean) / std
+            
+            # Изменение размерности для ONNX (NCHW)
+            image = np.transpose(image, (2, 0, 1))
+            image = np.expand_dims(image, axis=0)
+            
+            return image
+            
         except Exception as e:
-            logger.error(f"Ошибка кластеризации: {e}", exc_info=True)
-            return self._get_empty_clustering_result()
+            logger.error(f"Ошибка предобработки: {e}")
+            raise
 
-    def _calculate_intra_cluster_distances(self, cluster_embeddings: np.ndarray) -> Dict[str, float]:
-        """Расчет внутрикластерных расстояний"""
+    def _run_insightface_inference(self, preprocessed_image: np.ndarray) -> Optional[np.ndarray]:
+        """Запуск инференса InsightFace"""
         try:
-            if len(cluster_embeddings) < 2:
-                return {"mean": 0, "std": 0, "max": 0, "min": 0}
+            if self.insightface_session is None:
+                logger.error("Модель InsightFace не инициализирована")
+                return None
             
-            distances = pdist(cluster_embeddings, metric='cosine')
+            # Получение имени входного тензора
+            input_name = self.insightface_session.get_inputs()[0].name
             
-            return {
-                "mean": np.mean(distances),
-                "std": np.std(distances),
-                "max": np.max(distances),
-                "min": np.min(distances)
-            }
+            # Запуск инференса
+            outputs = self.insightface_session.run(None, {input_name: preprocessed_image})
+            
+            # Извлечение эмбеддинга
+            embedding = outputs[0][0]  # Первый батч, первый элемент
+            
+            return embedding
+            
         except Exception as e:
-            logger.error(f"Ошибка расчета внутрикластерных расстояний: {e}")
-            return {"mean": 0, "std": 0, "max": 0, "min": 0}
+            logger.error(f"Ошибка инференса InsightFace: {e}")
+            return None
 
-    def _get_empty_clustering_result(self) -> Dict[str, Any]:
-        """Получение пустого результата кластеризации"""
-        return {
-            "labels": np.array([]),
-            "n_clusters": 0,
-            "unique_clusters": [],
-            "outlier_ratio": 0.0
-        }
+    def _normalize_embedding(self, embedding: np.ndarray) -> np.ndarray:
+        """L2-нормализация эмбеддинга"""
+        try:
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                return embedding / norm
+            else:
+                logger.warning("Нулевой эмбеддинг, нормализация невозможна")
+                return embedding
+                
+        except Exception as e:
+            logger.error(f"Ошибка нормализации эмбеддинга: {e}")
+            return embedding
 
-    def build_identity_timeline(self, cluster_results: Dict[str, Any]) -> Dict[str, Any]:
+    def _assess_face_quality(self, face_image: np.ndarray) -> float:
+        """Оценка качества лица"""
+        try:
+            # Конвертация в градации серого
+            if len(face_image.shape) == 3:
+                gray = cv2.cvtColor(face_image, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = face_image
+            
+            # Оценка резкости (Laplacian variance)
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            sharpness_score = min(1.0, laplacian_var / 100.0)
+            
+            # Оценка контраста
+            contrast_score = np.std(gray) / 255.0
+            
+            # Оценка яркости
+            brightness = np.mean(gray) / 255.0
+            brightness_score = 1.0 - abs(brightness - 0.5) * 2
+            
+            # Общий балл качества
+            quality_score = (sharpness_score + contrast_score + brightness_score) / 3.0
+            
+            return float(max(0.0, min(1.0, quality_score)))
+            
+        except Exception as e:
+            logger.error(f"Ошибка оценки качества лица: {e}")
+            return 0.0
+
+    def _calculate_extraction_confidence(self, alignment_quality: float, 
+                                       face_quality: float) -> float:
+        """Расчет достоверности извлечения эмбеддинга"""
+        try:
+            # Взвешенная комбинация факторов качества
+            confidence = 0.6 * alignment_quality + 0.4 * face_quality
+            
+            return float(max(0.0, min(1.0, confidence)))
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета достоверности: {e}")
+            return 0.0
+
+    def _validate_embedding_package(self, package: EmbeddingPackage):
+        """Валидация пакета эмбеддинга"""
+        warnings = []
+        quality_flags = []
+        
+        try:
+            # Проверка размерности эмбеддинга
+            if len(package.embedding_vector) != EMBEDDING_DIMENSION:
+                warnings.append(f"Неверная размерность эмбеддинга: {len(package.embedding_vector)}")
+                quality_flags.append("wrong_dimension")
+            
+            # Проверка нормализации
+            norm = np.linalg.norm(package.embedding_vector)
+            if abs(norm - 1.0) > 0.01:
+                warnings.append(f"Эмбеддинг не нормализован: норма = {norm:.3f}")
+                quality_flags.append("not_normalized")
+            
+            # Проверка качества извлечения
+            if package.extraction_confidence < CLUSTER_CONFIDENCE_THRESHOLD:
+                warnings.append(f"Низкая достоверность извлечения: {package.extraction_confidence:.3f}")
+                quality_flags.append("low_confidence")
+            
+            # Проверка качества выравнивания
+            if package.alignment_quality < 0.5:
+                warnings.append(f"Низкое качество выравнивания: {package.alignment_quality:.3f}")
+                quality_flags.append("poor_alignment")
+            
+            package.warnings = warnings
+            package.quality_flags = quality_flags
+            
+        except Exception as e:
+            logger.error(f"Ошибка валидации пакета эмбеддинга: {e}")
+            package.warnings = [f"Ошибка валидации: {str(e)}"]
+            package.quality_flags = ["validation_error"]
+
+    def calculate_embedding_distances_matrix(self, embeddings: List[EmbeddingPackage]) -> np.ndarray:
         """
-        ИСПРАВЛЕНО: Построение временной линии идентичностей
-        Согласно правкам: правильный анализ gaps и appearances
+        Расчет матрицы расстояний между эмбеддингами
+        
+        Args:
+            embeddings: Список пакетов эмбеддингов
+            
+        Returns:
+            Матрица косинусных расстояний
         """
         try:
-            logger.info("Построение временной линии идентичностей")
+            if len(embeddings) < 2:
+                logger.warning("Недостаточно эмбеддингов для расчета матрицы расстояний")
+                return np.array([[]])
             
-            identity_timeline = {}
+            # Извлечение векторов
+            vectors = np.array([pkg.embedding_vector for pkg in embeddings])
             
-            for cluster_id, metadata in cluster_results.get("cluster_metadata", {}).items():
-                items = metadata.get("items", [])
-                
-                # Фильтрация элементов с датами
-                dated_items = [(item['date'], item) for item in items if item.get('date')]
-                dated_items.sort(key=lambda x: x[0])
-                
-                if not dated_items:
+            # Расчет матрицы косинусных расстояний
+            n = len(vectors)
+            distance_matrix = np.zeros((n, n))
+            
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dist = cosine(vectors[i], vectors[j])
+                    distance_matrix[i, j] = dist
+                    distance_matrix[j, i] = dist
+            
+            logger.debug(f"Рассчитана матрица расстояний {n}x{n}")
+            return distance_matrix
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета матрицы расстояний: {e}")
+            return np.array([[]])
+
+    def perform_identity_clustering(self, embeddings: List[EmbeddingPackage]) -> Dict[int, ClusterManifest]:
+        """
+        Кластеризация эмбеддингов для выявления идентичностей
+        
+        Args:
+            embeddings: Список пакетов эмбеддингов
+            
+        Returns:
+            Словарь кластеров по ID
+        """
+        try:
+            if len(embeddings) < DBSCAN_MIN_SAMPLES:
+                logger.warning(f"Недостаточно эмбеддингов для кластеризации: {len(embeddings)}")
+                return {}
+            
+            # Извлечение векторов
+            vectors = np.array([pkg.embedding_vector for pkg in embeddings])
+            
+            # Кластеризация DBSCAN
+            clustering = DBSCAN(
+                eps=DBSCAN_EPS,
+                min_samples=DBSCAN_MIN_SAMPLES,
+                metric='cosine'
+            )
+            
+            cluster_labels = clustering.fit_predict(vectors)
+            
+            # Обновление пакетов эмбеддингов
+            for i, package in enumerate(embeddings):
+                package.cluster_id = int(cluster_labels[i])
+                package.is_outlier = (cluster_labels[i] == -1)
+            
+            # Создание манифестов кластеров
+            clusters = {}
+            unique_labels = set(cluster_labels)
+            
+            for label in unique_labels:
+                if label == -1:  # Пропускаем выбросы
                     continue
                 
-                dates = [item[0] for item in dated_items]
+                # Получение членов кластера
+                cluster_members = [pkg for pkg, lbl in zip(embeddings, cluster_labels) if lbl == label]
                 
-                # ИСПРАВЛЕНО: Анализ временных пропусков
-                gaps = []
-                max_gap_days = get_chronological_analysis_parameters().get("max_gap_days", 180)
+                # Создание манифеста кластера
+                manifest = self._create_cluster_manifest(label, cluster_members)
+                clusters[label] = manifest
                 
-                for i in range(1, len(dates)):
-                    gap_days = (dates[i] - dates[i-1]).days
-                    if gap_days > max_gap_days:
-                        gaps.append({
-                            "start_date": dates[i-1],
-                            "end_date": dates[i],
-                            "gap_days": gap_days
-                        })
-                
-                # ИСПРАВЛЕНО: Расчет appearances per month
-                appearances_per_month = self._calculate_appearances_per_month(dates)
-                
-                identity_timeline[f"Identity_{cluster_id}"] = {
-                    "cluster_id": cluster_id,
-                    "first_appearance": dates[0],
-                    "last_appearance": dates[-1],
-                    "total_appearances": len(dated_items),
-                    "active_period_days": (dates[-1] - dates[0]).days,
-                    "gaps": gaps,
-                    "appearances_per_month": appearances_per_month,
-                    "avg_confidence": metadata.get("avg_confidence", 0),
-                    "cluster_size": metadata.get("size", 0),
-                    "appearance_dates": dates
-                }
+                # Обновление информации о кластере в пакетах
+                for member in cluster_members:
+                    member.cluster_confidence = manifest.cohesion_score
+                    member.mean_cluster_distance = self._calculate_mean_distance_to_cluster(
+                        member, cluster_members
+                    )
             
-            logger.info(f"Временная линия построена для {len(identity_timeline)} идентичностей")
-            return identity_timeline
+            # Расчет расстояний до ближайших соседей
+            self._calculate_nearest_neighbor_distances(embeddings)
+            
+            self.processing_stats['clusters_created'] = len(clusters)
+            
+            logger.info(f"Создано {len(clusters)} кластеров из {len(embeddings)} эмбеддингов")
+            return clusters
+            
+        except Exception as e:
+            logger.error(f"Ошибка кластеризации: {e}")
+            return {}
+
+    def _create_cluster_manifest(self, cluster_id: int, 
+                               members: List[EmbeddingPackage]) -> ClusterManifest:
+        """Создание манифеста кластера"""
+        try:
+            # Расчет центра кластера
+            vectors = np.array([member.embedding_vector for member in members])
+            center_embedding = np.mean(vectors, axis=0)
+            center_embedding = center_embedding / np.linalg.norm(center_embedding)  # Нормализация
+            
+            # Расчет статистик кластера
+            distances_to_center = [cosine(vec, center_embedding) for vec in vectors]
+            intra_cluster_variance = float(np.var(distances_to_center))
+            cluster_radius = float(np.max(distances_to_center))
+            
+            # Временные характеристики (заглушки, будут заполнены в temporal_analyzer)
+            first_appearance = datetime.date.today()
+            last_appearance = datetime.date.today()
+            
+            # Расчет качества кластера
+            silhouette_score = self._calculate_silhouette_score(members, vectors)
+            cohesion_score = 1.0 - intra_cluster_variance  # Простая метрика сплоченности
+            
+            # Стабильность кластера
+            stability_score = self._calculate_cluster_stability(vectors)
+            
+            manifest = ClusterManifest(
+                cluster_id=cluster_id,
+                center_embedding=center_embedding,
+                member_count=len(members),
+                first_appearance=first_appearance,
+                last_appearance=last_appearance,
+                intra_cluster_variance=intra_cluster_variance,
+                cluster_radius=cluster_radius,
+                stability_score=stability_score,
+                appearance_gaps=[],  # Будет заполнено в temporal_analyzer
+                total_timespan_days=0,  # Будет заполнено в temporal_analyzer
+                silhouette_score=silhouette_score,
+                cohesion_score=cohesion_score,
+                member_image_ids=[member.image_id for member in members]
+            )
+            
+            return manifest
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания манифеста кластера: {e}")
+            raise
+
+    def _calculate_silhouette_score(self, members: List[EmbeddingPackage], 
+                                  vectors: np.ndarray) -> float:
+        """Расчет silhouette score для кластера"""
+        try:
+            if len(vectors) < 2:
+                return 1.0  # Единственный элемент в кластере
+            
+            # Внутрикластерные расстояния
+            intra_distances = []
+            for i, vec in enumerate(vectors):
+                other_vectors = np.delete(vectors, i, axis=0)
+                distances = [cosine(vec, other_vec) for other_vec in other_vectors]
+                intra_distances.append(np.mean(distances))
+            
+            # Упрощенный silhouette score (без межкластерных расстояний)
+            mean_intra_distance = np.mean(intra_distances)
+            silhouette = 1.0 - mean_intra_distance
+            
+            return float(max(0.0, min(1.0, silhouette)))
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета silhouette score: {e}")
+            return 0.0
+
+    def _calculate_cluster_stability(self, vectors: np.ndarray) -> float:
+        """Расчет стабильности кластера"""
+        try:
+            if len(vectors) < 2:
+                return 1.0
+            
+            # Расчет центра
+            center = np.mean(vectors, axis=0)
+            center = center / np.linalg.norm(center)
+            
+            # Расстояния до центра
+            distances = [cosine(vec, center) for vec in vectors]
+            
+            # Стабильность как обратная величина стандартного отклонения
+            stability = 1.0 / (1.0 + np.std(distances))
+            
+            return float(stability)
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета стабильности кластера: {e}")
+            return 0.0
+
+    def _calculate_mean_distance_to_cluster(self, target: EmbeddingPackage, 
+                                          cluster_members: List[EmbeddingPackage]) -> float:
+        """Расчет среднего расстояния до кластера"""
+        try:
+            distances = []
+            for member in cluster_members:
+                if member.image_id != target.image_id:
+                    dist = cosine(target.embedding_vector, member.embedding_vector)
+                    distances.append(dist)
+            
+            return float(np.mean(distances)) if distances else 0.0
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета расстояния до кластера: {e}")
+            return 0.0
+
+    def _calculate_nearest_neighbor_distances(self, embeddings: List[EmbeddingPackage]):
+        """Расчет расстояний до ближайших соседей"""
+        try:
+            for i, target in enumerate(embeddings):
+                min_distance = float('inf')
+                
+                for j, other in enumerate(embeddings):
+                    if i != j:
+                        dist = cosine(target.embedding_vector, other.embedding_vector)
+                        min_distance = min(min_distance, dist)
+                
+                target.nearest_neighbor_distance = min_distance
+                
+        except Exception as e:
+            logger.error(f"Ошибка расчета расстояний до ближайших соседей: {e}")
+
+    def build_identity_timeline(self, clusters: Dict[int, ClusterManifest], 
+                              data_manager) -> IdentityTimeline:
+        """
+        Построение временной линии идентичностей
+        
+        Args:
+            clusters: Словарь кластеров
+            data_manager: Менеджер данных для получения дат
+            
+        Returns:
+            Временная линия идентичностей
+        """
+        try:
+            if not clusters:
+                logger.warning("Нет кластеров для построения временной линии")
+                return IdentityTimeline(
+                    clusters={},
+                    total_identities=0,
+                    date_range=(datetime.date.today(), datetime.date.today()),
+                    identity_switches=[],
+                    switch_frequency=0.0,
+                    dominant_identity=-1,
+                    identity_distribution={}
+                )
+            
+            # Обновление временных характеристик кластеров
+            updated_clusters = {}
+            all_dates = []
+            
+            for cluster_id, manifest in clusters.items():
+                # Получение дат для членов кластера
+                member_dates = []
+                for image_id in manifest.member_image_ids:
+                    # Здесь должен быть вызов к data_manager для получения даты
+                    # Пока используем заглушку
+                    member_dates.append(datetime.date.today())
+                
+                if member_dates:
+                    member_dates.sort()
+                    all_dates.extend(member_dates)
+                    
+                    # Обновление временных характеристик
+                    manifest.first_appearance = member_dates[0]
+                    manifest.last_appearance = member_dates[-1]
+                    manifest.total_timespan_days = (member_dates[-1] - member_dates[0]).days
+                    
+                    # Расчет пропусков между появлениями
+                    gaps = []
+                    for i in range(1, len(member_dates)):
+                        gap = (member_dates[i] - member_dates[i-1]).days
+                        gaps.append(gap)
+                    manifest.appearance_gaps = gaps
+                
+                updated_clusters[cluster_id] = manifest
+            
+            # Общая статистика
+            if all_dates:
+                all_dates.sort()
+                date_range = (all_dates[0], all_dates[-1])
+            else:
+                date_range = (datetime.date.today(), datetime.date.today())
+            
+            # Анализ переключений идентичностей
+            identity_switches = self._analyze_identity_switches(updated_clusters)
+            
+            # Расчет частоты переключений
+            total_days = (date_range[1] - date_range[0]).days
+            switch_frequency = len(identity_switches) / max(total_days, 1)
+            
+            # Определение доминирующей идентичности
+            dominant_identity = max(updated_clusters.keys(), 
+                                  key=lambda x: updated_clusters[x].member_count)
+            
+            # Распределение идентичностей
+            total_members = sum(manifest.member_count for manifest in updated_clusters.values())
+            identity_distribution = {
+                cluster_id: manifest.member_count / total_members
+                for cluster_id, manifest in updated_clusters.items()
+            }
+            
+            timeline = IdentityTimeline(
+                clusters=updated_clusters,
+                total_identities=len(updated_clusters),
+                date_range=date_range,
+                identity_switches=identity_switches,
+                switch_frequency=switch_frequency,
+                dominant_identity=dominant_identity,
+                identity_distribution=identity_distribution
+            )
+            
+            logger.info(f"Построена временная линия с {len(updated_clusters)} идентичностями")
+            return timeline
             
         except Exception as e:
             logger.error(f"Ошибка построения временной линии: {e}")
-            return {}
+            return IdentityTimeline(
+                clusters={},
+                total_identities=0,
+                date_range=(datetime.date.today(), datetime.date.today()),
+                identity_switches=[],
+                switch_frequency=0.0,
+                dominant_identity=-1,
+                identity_distribution={}
+            )
 
-    def _calculate_appearances_per_month(self, dates: List[datetime]) -> Dict[str, int]:
-        """Расчет количества появлений по месяцам"""
+    def _analyze_identity_switches(self, clusters: Dict[int, ClusterManifest]) -> List[Dict[str, Any]]:
+        """Анализ переключений между идентичностями"""
         try:
-            appearances_by_month = {}
+            switches = []
             
-            for date in dates:
-                month_key = date.strftime("%Y-%m")
-                if month_key not in appearances_by_month:
-                    appearances_by_month[month_key] = 0
-                appearances_by_month[month_key] += 1
+            # Создание временной последовательности появлений
+            appearances = []
+            for cluster_id, manifest in clusters.items():
+                appearances.append({
+                    'date': manifest.first_appearance,
+                    'cluster_id': cluster_id,
+                    'type': 'first_appearance'
+                })
+                appearances.append({
+                    'date': manifest.last_appearance,
+                    'cluster_id': cluster_id,
+                    'type': 'last_appearance'
+                })
             
-            return appearances_by_month
+            # Сортировка по дате
+            appearances.sort(key=lambda x: x['date'])
+            
+            # Поиск переключений
+            current_identity = None
+            for appearance in appearances:
+                if appearance['type'] == 'first_appearance':
+                    if current_identity is not None and current_identity != appearance['cluster_id']:
+                        switches.append({
+                            'date': appearance['date'],
+                            'from_identity': current_identity,
+                            'to_identity': appearance['cluster_id'],
+                            'switch_type': 'transition'
+                        })
+                    current_identity = appearance['cluster_id']
+            
+            return switches
+            
         except Exception as e:
-            logger.error(f"Ошибка расчета appearances per month: {e}")
-            return {}
+            logger.error(f"Ошибка анализа переключений идентичностей: {e}")
+            return []
 
-    def detect_embedding_anomalies_by_dimensions(self, embedding: np.ndarray, 
-                                               reference_embeddings: List[np.ndarray]) -> Dict[str, Any]:
+    def get_processing_statistics(self) -> Dict[str, Any]:
         """
-        ИСПРАВЛЕНО: Обнаружение аномалий эмбеддингов по диапазонам измерений
-        Согласно правкам: dimensions 45-67 (texture), 120-145 (geometry), 200-230 (lighting)
-        """
-        if len(embedding) != 512 or len(reference_embeddings) == 0:
-            logger.warning("Невалидные данные для анализа аномалий эмбеддингов")
-            return self._get_empty_anomalies_result()
+        Получение статистики обработки
         
-        try:
-            logger.info("Анализ аномалий эмбеддингов по диапазонам измерений")
-            
-            # Преобразование референсных эмбеддингов в массив
-            reference_array = np.array(reference_embeddings)
-            
-            # Расчет статистик по измерениям
-            mean_dims = np.mean(reference_array, axis=0)
-            std_dims = np.std(reference_array, axis=0)
-            
-            # Z-scores для всех измерений
-            z_scores = (embedding - mean_dims) / (std_dims + 1e-8)  # epsilon для избежания деления на ноль
-            
-            # ИСПРАВЛЕНО: Пороги и диапазоны согласно правкам
-            dimension_anomaly_threshold = EMBEDDING_ANALYSIS_THRESHOLDS["dimension_anomaly_threshold"]
-            
-            anomalies_by_category = {
-                "overall_detected": False,
-                "texture_anomalies": {"detected": False, "count": 0, "dimensions": []},
-                "geometric_anomalies": {"detected": False, "count": 0, "dimensions": []},
-                "lighting_anomalies": {"detected": False, "count": 0, "dimensions": []},
-                "other_anomalies": {"detected": False, "count": 0, "dimensions": []}
-            }
-            
-            # ИСПРАВЛЕНО: Диапазоны из coreconfig
-            texture_dims_range = EMBEDDING_ANALYSIS_THRESHOLDS["texture_anomaly_dims"]  # (45, 67)
-            geometric_dims_range = EMBEDDING_ANALYSIS_THRESHOLDS["geometric_anomaly_dims"]  # (120, 145)
-            lighting_dims_range = EMBEDDING_ANALYSIS_THRESHOLDS["lighting_anomaly_dims"]  # (200, 230)
-            
-            # Анализ текстурных аномалий (dimensions 45-67)
-            texture_z_scores = np.abs(z_scores[texture_dims_range[0]:texture_dims_range[1] + 1])
-            texture_anomaly_indices = np.where(texture_z_scores > dimension_anomaly_threshold)[0]
-            
-            if len(texture_anomaly_indices) > 0:
-                anomalies_by_category["texture_anomalies"]["detected"] = True
-                anomalies_by_category["texture_anomalies"]["count"] = len(texture_anomaly_indices)
-                anomalies_by_category["texture_anomalies"]["dimensions"] = (texture_anomaly_indices + texture_dims_range[0]).tolist()
-                anomalies_by_category["overall_detected"] = True
-            
-            # Анализ геометрических аномалий (dimensions 120-145)
-            geometric_z_scores = np.abs(z_scores[geometric_dims_range[0]:geometric_dims_range[1] + 1])
-            geometric_anomaly_indices = np.where(geometric_z_scores > dimension_anomaly_threshold)[0]
-            
-            if len(geometric_anomaly_indices) > 0:
-                anomalies_by_category["geometric_anomalies"]["detected"] = True
-                anomalies_by_category["geometric_anomalies"]["count"] = len(geometric_anomaly_indices)
-                anomalies_by_category["geometric_anomalies"]["dimensions"] = (geometric_anomaly_indices + geometric_dims_range[0]).tolist()
-                anomalies_by_category["overall_detected"] = True
-            
-            # Анализ световых аномалий (dimensions 200-230)
-            lighting_z_scores = np.abs(z_scores[lighting_dims_range[0]:lighting_dims_range[1] + 1])
-            lighting_anomaly_indices = np.where(lighting_z_scores > dimension_anomaly_threshold)[0]
-            
-            if len(lighting_anomaly_indices) > 0:
-                anomalies_by_category["lighting_anomalies"]["detected"] = True
-                anomalies_by_category["lighting_anomalies"]["count"] = len(lighting_anomaly_indices)
-                anomalies_by_category["lighting_anomalies"]["dimensions"] = (lighting_anomaly_indices + lighting_dims_range[0]).tolist()
-                anomalies_by_category["overall_detected"] = True
-            
-            # Анализ других аномалий
-            all_anomaly_indices = np.where(np.abs(z_scores) > dimension_anomaly_threshold)[0]
-            specific_anomaly_dims = set(anomalies_by_category["texture_anomalies"]["dimensions"] + 
-                                      anomalies_by_category["geometric_anomalies"]["dimensions"] + 
-                                      anomalies_by_category["lighting_anomalies"]["dimensions"])
-            
-            other_anomaly_indices = [idx for idx in all_anomaly_indices if idx not in specific_anomaly_dims]
-            
-            if len(other_anomaly_indices) > 0:
-                anomalies_by_category["other_anomalies"]["detected"] = True
-                anomalies_by_category["other_anomalies"]["count"] = len(other_anomaly_indices)
-                anomalies_by_category["other_anomalies"]["dimensions"] = other_anomaly_indices
-                anomalies_by_category["overall_detected"] = True
-            
-            logger.info(f"Анализ аномалий завершен: overall_detected={anomalies_by_category['overall_detected']}")
-            
-            return anomalies_by_category
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа аномалий эмбеддингов: {e}")
-            return self._get_empty_anomalies_result()
-
-    def _get_empty_anomalies_result(self) -> Dict[str, Any]:
-        """Получение пустого результата анализа аномалий"""
-        return {
-            "overall_detected": False,
-            "texture_anomalies": {"detected": False, "count": 0, "dimensions": []},
-            "geometric_anomalies": {"detected": False, "count": 0, "dimensions": []},
-            "lighting_anomalies": {"detected": False, "count": 0, "dimensions": []},
-            "other_anomalies": {"detected": False, "count": 0, "dimensions": []}
+        Returns:
+            Словарь со статистикой
+        """
+        stats = self.processing_stats.copy()
+        
+        if stats['total_processed'] > 0:
+            stats['success_rate'] = stats['successful_extractions'] / stats['total_processed']
+            stats['cache_hit_rate'] = stats['cache_hits'] / stats['total_processed']
+        else:
+            stats['success_rate'] = 0.0
+            stats['cache_hit_rate'] = 0.0
+        
+        # Информация о модели
+        stats['model_info'] = {
+            'model_loaded': self.insightface_session is not None,
+            'embedding_dimension': EMBEDDING_DIMENSION,
+            'dbscan_eps': DBSCAN_EPS,
+            'dbscan_min_samples': DBSCAN_MIN_SAMPLES
         }
-
-    def calculate_identity_confidence_score(self, embedding: np.ndarray, 
-                                          cluster_center: np.ndarray, 
-                                          appearances_count: int, 
-                                          temporal_stability_score: float) -> float:
-        """
-        ИСПРАВЛЕНО: Расчет confidence score идентичности
-        Согласно правкам: учет distance, appearances, temporal stability
-        """
-        if embedding.size == 0 or cluster_center.size == 0 or appearances_count <= 0:
-            return 0.0
         
-        try:
-            logger.info("Расчет confidence score идентичности")
-            
-            # ИСПРАВЛЕНО: Расстояние до центра кластера
-            distance_to_center = cosine_distances(embedding.reshape(1, -1), cluster_center.reshape(1, -1))[0, 0]
-            
-            # Нормализованный score расстояния (1 - distance = similarity)
-            normalized_distance_score = max(0.0, 1.0 - distance_to_center)
-            
-            # ИСПРАВЛЕНО: Нормализованный score количества появлений
-            saturation_factor = EMBEDDING_ANALYSIS_THRESHOLDS.get("APPEARANCE_SATURATION_FACTOR", 50)
-            normalized_appearance_score = min(1.0, np.log1p(appearances_count) / (np.log1p(saturation_factor) + 1e-8))
-            
-            # ИСПРАВЛЕНО: Нормализованный temporal stability score
-            normalized_temporal_stability_score = np.clip(temporal_stability_score, 0.0, 1.0)
-            
-            # ИСПРАВЛЕНО: Взвешенная комбинация согласно AUTHENTICITY_WEIGHTS
-            confidence_score = (
-                AUTHENTICITY_WEIGHTS["embedding"] * normalized_distance_score +
-                AUTHENTICITY_WEIGHTS["temporal_consistency"] * normalized_appearance_score +
-                AUTHENTICITY_WEIGHTS["temporal_stability"] * normalized_temporal_stability_score
-            )
-            
-            # Нормализация по сумме весов
-            total_weight_sum = (AUTHENTICITY_WEIGHTS["embedding"] + 
-                              AUTHENTICITY_WEIGHTS["temporal_consistency"] + 
-                              AUTHENTICITY_WEIGHTS["temporal_stability"])
-            
-            if total_weight_sum > 0:
-                confidence_score /= total_weight_sum
-            
-            result = float(np.clip(confidence_score, 0.0, 1.0))
-            
-            logger.info(f"Confidence score рассчитан: {result:.3f}")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Ошибка расчета confidence score: {e}")
-            return 0.0
-
-    def age_corrected_embedding_drift(self, current_embeddings: List[np.ndarray], 
-                                    baseline_embeddings: List[np.ndarray], 
-                                    age_difference: float) -> Dict[str, Any]:
-        """
-        ИСПРАВЛЕНО: Анализ дрифта эмбеддингов с учетом возраста
-        Согласно правкам: добавлена функция agecorrectedembeddingdrift
-        """
-        if not current_embeddings or not baseline_embeddings:
-            return {"drift_detected": False, "reason": "Недостаточно данных для анализа дрифта"}
+        # Информация о кэше
+        stats['cache_info'] = {
+            'embedding_cache_size': len(self.embedding_cache),
+            'cluster_cache_size': len(self.cluster_cache)
+        }
         
-        try:
-            logger.info(f"Анализ дрифта эмбеддингов с учетом возраста: {age_difference} лет")
-            
-            # Расчет среднего дрифта
-            actual_drift = self._calculate_mean_cosine_distance(current_embeddings, baseline_embeddings)
-            
-            # ИСПРАВЛЕНО: Ожидаемый дрифт на основе aging model
-            expected_drift = age_difference * AGING_MODEL.get("elasticity_loss_per_year", 0.015) * 0.002  # Коэффициент для эмбеддингов
-            
-            # Анализ аномального дрифта
-            anomalous_drift = False
-            severity = 0.0
-            
-            if expected_drift > 0 and actual_drift > expected_drift * 3:  # Превышение в 3 раза
-                anomalous_drift = True
-                severity = actual_drift / expected_drift
-            
-            result = {
-                "anomalous_drift": anomalous_drift,
-                "severity": severity,
-                "actual_drift": actual_drift,
-                "expected_drift": expected_drift,
-                "age_difference": age_difference,
-                "drift_detected": anomalous_drift
-            }
-            
-            if anomalous_drift:
-                result["reason"] = f"Аномальный дрифт: {actual_drift:.4f} > {expected_drift:.4f} (ожидаемый)"
-            else:
-                result["reason"] = f"Нормальный дрифт: {actual_drift:.4f} <= {expected_drift:.4f} (ожидаемый)"
-            
-            logger.info(f"Анализ дрифта завершен: drift_detected={result['drift_detected']}")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа дрифта эмбеддингов: {e}")
-            return {"drift_detected": False, "reason": f"Ошибка: {str(e)}"}
-
-    def _calculate_mean_cosine_distance(self, embeddings_list1: List[np.ndarray], 
-                                      embeddings_list2: List[np.ndarray]) -> float:
-        """Расчет среднего косинусного расстояния между двумя списками эмбеддингов"""
-        if not embeddings_list1 or not embeddings_list2:
-            return 0.0
+        # Информация о памяти
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        stats['memory_usage_mb'] = memory_info.rss / (1024 * 1024)
         
+        return stats
+
+    def clear_cache(self):
+        """Очистка кэша результатов"""
         try:
-            # Расчет средних эмбеддингов
-            current_mean_embedding = np.mean(embeddings_list1, axis=0)
-            baseline_mean_embedding = np.mean(embeddings_list2, axis=0)
-            
-            # Косинусное расстояние
-            distance = 1 - np.dot(current_mean_embedding, baseline_mean_embedding) / (
-                np.linalg.norm(current_mean_embedding) * np.linalg.norm(baseline_mean_embedding) + 1e-8
-            )
-            
-            return distance
+            self.embedding_cache.clear()
+            self.cluster_cache.clear()
+            logger.info("Кэш EmbeddingAnalyzer очищен")
             
         except Exception as e:
-            logger.error(f"Ошибка расчета косинусного расстояния: {e}")
-            return 0.0
+            logger.error(f"Ошибка очистки кэша: {e}")
 
-    def analyze_cluster_temporal_stability(self, cluster_timeline: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        ИСПРАВЛЕНО: Анализ временной стабильности кластеров
-        Согласно правкам: анализ coefficient of variation
-        """
+    def save_cache(self, cache_filename: str = "embedding_cache.pkl"):
+        """Сохранение кэша на диск"""
         try:
-            logger.info("Анализ временной стабильности кластеров")
-            
-            stability_results = {}
-            
-            for identity_id, data in cluster_timeline.items():
-                appearance_dates = sorted(data.get("appearance_dates", []))
-                
-                if len(appearance_dates) < 2:
-                    stability_results[identity_id] = {
-                        "stable": True,
-                        "reason": "Недостаточно данных для анализа стабильности"
-                    }
-                    continue
-                
-                # Расчет интервалов между появлениями
-                intervals = np.array([(appearance_dates[i+1] - appearance_dates[i]).days 
-                                    for i in range(len(appearance_dates) - 1)])
-                
-                # Анализ стабильности интервалов
-                if len(intervals) > 1:
-                    std_interval = np.std(intervals)
-                    mean_interval = np.mean(intervals)
-                    
-                    # Coefficient of variation
-                    if mean_interval > 0 and std_interval / mean_interval > CRITICAL_THRESHOLDS.get("temporal_stability_threshold", 0.5):
-                        stability_results[identity_id] = {
-                            "stable": False,
-                            "reason": f"Высокая вариабельность интервалов: CV={std_interval/mean_interval:.3f}"
-                        }
-                        continue
-                
-                # Проверка максимального пропуска
-                max_gap = np.max(intervals)
-                max_gap_days = get_chronological_analysis_parameters().get("max_gap_days", 180)
-                
-                if max_gap > max_gap_days * 6:  # Критический пропуск
-                    stability_results[identity_id] = {
-                        "stable": False,
-                        "reason": f"Критический пропуск: {max_gap} дней"
-                    }
-                    continue
-                
-                stability_results[identity_id] = {
-                    "stable": True,
-                    "reason": "Стабильные временные интервалы"
-                }
-            
-            logger.info(f"Анализ стабильности завершен для {len(stability_results)} идентичностей")
-            return stability_results
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа временной стабильности: {e}")
-            return {}
-
-    def save_cache(self, cache_file: str = "embedding_cache.pkl") -> None:
-        """Сохранение кэша в файл"""
-        try:
-            cache_path = CACHE_DIR / cache_file
-            CACHE_DIR.mkdir(exist_ok=True)
+            cache_path = self.cache_dir / cache_filename
             
             cache_data = {
-                "embeddings_cache": self.embeddings_cache,
-                "clustering_cache": self.clustering_cache
+                'embedding_cache': self.embedding_cache,
+                'cluster_cache': self.cluster_cache,
+                'processing_stats': self.processing_stats
             }
             
             with open(cache_path, 'wb') as f:
@@ -688,94 +928,81 @@ class EmbeddingAnalyzer:
         except Exception as e:
             logger.error(f"Ошибка сохранения кэша: {e}")
 
-    def load_cache(self, cache_file: str = "embedding_cache.pkl") -> None:
-        """Загрузка кэша из файла"""
+    def load_cache(self, cache_filename: str = "embedding_cache.pkl") -> bool:
+        """Загрузка кэша с диска"""
         try:
-            cache_path = CACHE_DIR / cache_file
+            cache_path = self.cache_dir / cache_filename
             
             if cache_path.exists():
                 with open(cache_path, 'rb') as f:
                     cache_data = pickle.load(f)
                 
-                self.embeddings_cache = cache_data.get("embeddings_cache", {})
-                self.clustering_cache = cache_data.get("clustering_cache", {})
+                self.embedding_cache = cache_data.get('embedding_cache', {})
+                self.cluster_cache = cache_data.get('cluster_cache', {})
+                self.processing_stats.update(cache_data.get('processing_stats', {}))
                 
                 logger.info(f"Кэш загружен: {cache_path}")
-            else:
-                logger.info("Файл кэша не найден, используется пустой кэш")
-                
+                return True
+            
+            return False
+            
         except Exception as e:
             logger.error(f"Ошибка загрузки кэша: {e}")
+            return False
 
-    def self_test(self) -> None:
-        """
-        ИСПРАВЛЕНО: Самопроверка анализатора эмбеддингов
-        Согласно правкам: Проверка извлечения эмбеддинга и кластеризации
-        """
-        logger.info("Запуск самотеста EmbeddingAnalyzer...")
-        try:
-            # Ensure InsightFace model is initialized for self-test
-            if self.face_app is None:
-                logger.info("InsightFace модель не инициализирована, инициализируем для самотеста.")
-                self.initialize_insightface_model()
-                if self.face_app is None: # Проверка после попытки инициализации
-                    raise RuntimeError("Не удалось инициализировать InsightFace для самотеста.")
-            
-            app = self.face_app # Используем уже инициализированный app
-            
-            # Загрузка реального изображения для теста
-            test_image_path = "/Users/victorkhudyakov/nn/3DDFA2/3/01_01_10.jpg"
-            img = cv2.imread(test_image_path)
-            
-            if img is None:
-                logger.error(f"Не удалось загрузить тестовое изображение с пути: {test_image_path}")
-                raise FileNotFoundError(f"Тестовое изображение не найдено: {test_image_path}")
+# === ФУНКЦИИ САМОТЕСТИРОВАНИЯ ===
 
-            # Тестирование извлечения эмбеддинга
-            emb, conf = self.extract_512d_face_embedding(img, app)
-            
-            assert emb is not None, "Self-test: эмбеддинг не должен быть None"
-            assert conf > 0.3, "Self-test: confidence должен быть > 0.3 для реального лица"
-            logger.info("✔ Self-test: Извлечение эмбеддинга успешно")
+def self_test():
+    """Самотестирование модуля embedding_analyzer"""
+    try:
+        logger.info("Запуск самотестирования embedding_analyzer...")
+        
+        # Создание экземпляра анализатора
+        analyzer = EmbeddingAnalyzer()
+        
+        # Создание тестового изображения и ландмарков
+        test_image = np.random.randint(0, 255, (112, 112, 3), dtype=np.uint8)
+        test_landmarks = np.random.rand(68, 3) * 100
+        
+        # Тест извлечения ключевых точек
+        keypoints = analyzer._extract_5_keypoints(test_landmarks)
+        assert keypoints.shape == (5, 2), "Неверная форма ключевых точек"
+        
+        # Тест предобработки
+        preprocessed = analyzer._preprocess_for_insightface(test_image)
+        assert preprocessed.shape == (1, 3, 112, 112), "Неверная форма предобработанного изображения"
+        
+        # Тест нормализации эмбеддинга
+        test_embedding = np.random.rand(512)
+        normalized = analyzer._normalize_embedding(test_embedding)
+        assert abs(np.linalg.norm(normalized) - 1.0) < 0.01, "Эмбеддинг не нормализован"
+        
+        # Тест статистики
+        stats = analyzer.get_processing_statistics()
+        assert 'success_rate' in stats, "Отсутствует статистика"
+        
+        logger.info("Самотестирование embedding_analyzer завершено успешно")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка самотестирования: {e}")
+        return False
 
-            # Test clustering (Пример)
-            dummy_embeddings = [{"embedding": np.random.rand(512), "metadata": {"date": datetime.now()}} for _ in range(10)]
-            cluster_results = self.perform_identity_clustering(dummy_embeddings)
-            assert "labels" in cluster_results, "Self-test: Кластеризация не вернула метки"
-            logger.info("✔ Self-test: Кластеризация успешно")
-
-            logger.info("✔ Все самотесты EmbeddingAnalyzer пройдены успешно.")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка в самотесте EmbeddingAnalyzer: {e}", exc_info=True)
-            raise
-
-    def ensemble_embedding_analysis(self, embeddings: np.ndarray, strategies=("mean-cosine","median")):
-        """
-        Выполняет N стратегий кластеризации, объединяет через majority_vote на уровне принадлежности точки кластеру.
-        """
-        results = []
-        if 'mean-cosine' in strategies:
-            meta = [{'embedding': e} for e in embeddings]
-            res = self.perform_identity_clustering(meta)
-            results.append(np.array(res['labels']))
-        if 'median' in strategies:
-            med = np.median(embeddings, axis=0, keepdims=True)
-            emb_med = embeddings - med
-            meta = [{'embedding': e} for e in emb_med]
-            res = self.perform_identity_clustering(meta)
-            results.append(np.array(res['labels']))
-        if not results:
-            return np.array([-1]*len(embeddings))
-        stacked = np.vstack(results)
-        def vote(x):
-            vals = x[x!=-1]
-            return np.bincount(vals).argmax() if len(vals) else -1
-        final = np.apply_along_axis(vote, 0, stacked)
-        return final
-
-# ==================== ТОЧКА ВХОДА ====================
+# === ИНИЦИАЛИЗАЦИЯ ===
 
 if __name__ == "__main__":
-    analyzer = EmbeddingAnalyzer()
-    analyzer.self_test()
+    # Запуск самотестирования при прямом вызове модуля
+    success = self_test()
+    if success:
+        print("✅ Модуль embedding_analyzer работает корректно")
+        
+        # Демонстрация основной функциональности
+        analyzer = EmbeddingAnalyzer()
+        print(f"📊 Эмбеддингов в кэше: {len(analyzer.embedding_cache)}")
+        print(f"🔧 Кластеров в кэше: {len(analyzer.cluster_cache)}")
+        print(f"📏 Размерность эмбеддинга: {EMBEDDING_DIMENSION}")
+        print(f"🎯 DBSCAN eps: {DBSCAN_EPS}")
+        print(f"💾 Кэш-директория: {analyzer.cache_dir}")
+    else:
+        print("❌ Обнаружены ошибки в модуле embedding_analyzer")
+        exit(1)

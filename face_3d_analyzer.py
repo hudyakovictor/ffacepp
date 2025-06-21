@@ -1,1291 +1,1881 @@
-"""
-Face3DAnalyzer - Анализатор 3D лиц с извлечением ландмарок и метрик
-Версия: 2.0
-Дата: 2025-06-15
-Исправлены все критические ошибки согласно правкам
-"""
-
-import numpy as np
-import cv2
-import torch
-import yaml
-import pickle
-import math
-import logging
-from typing import Tuple, Dict, List, Optional, Any, Union
-from scipy.spatial.distance import euclidean, pdist, squareform, directed_hausdorff # ИСПРАВЛЕНО: Добавлен directed_hausdorff
-from scipy.stats import mode
-from scipy.spatial import distance
-from pathlib import Path
-from datetime import datetime, timedelta
+# face_3d_analyzer.py
 import os
 import sys
-import collections
+import json
+import logging
+import hashlib
+import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any, Union
+from dataclasses import dataclass, field, asdict
+import numpy as np
+import cv2
+from PIL import Image
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+from scipy.spatial.distance import cdist
+from scipy.spatial.transform import Rotation as R
+import pickle
+import time
+import psutil
+import msgpack
+from functools import lru_cache
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from collections import OrderedDict, defaultdict
+
+from core_config import get_config
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/face3danalyzer.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
-# Импорт 3DDFA компонентов
-from TDDFA_ONNX import TDDFA_ONNX
-from FaceBoxes.FaceBoxes_ONNX import FaceBoxes_ONNX as FaceBoxesDetector
-from utils.tddfa_util import _parse_param # ИСПРАВЛЕНО: Заменен calc_pose на _parse_param
+# === КОНСТАНТЫ И КОНФИГУРАЦИЯ ===
 
-# Попытка импорта 3DDFA компонентов
-try:
-    from core_config import (
-        USE_ONNX, ONNX_EXECUTION_PROVIDERS, IS_MACOS, IS_ARM64,
-        REQUIRED_3DDFA_FILES, VIEW_CONFIGS, CAMERA_BOX_FRONT_SIZE_FACTOR,
-        CRITICAL_THRESHOLDS, get_identity_signature_metrics,
-        get_view_configs, AGING_MODEL, MIN_VISIBILITY_Z, MODELS_DIR,
-        STANDARD_IOD, STANDARD_NOSE_EYE, STANDARD_FACE_HEIGHT, STANDARD_PROFILE_HEIGHT, IOD_RATIO_MIN, IOD_RATIO_MAX
-    )
+# Размеры изображений для 3DDFA_V2
+TARGET_SIZE = (120, 120)
+ORIGINAL_SIZE = (800, 800)
+DENSE_MESH_SIZE = 38365  # Количество точек плотной поверхности
+
+# Параметры субпиксельной точности
+SUBPIXEL_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+SUBPIXEL_WIN_SIZE = (11, 11)
+SUBPIXEL_ZERO_ZONE = (-1, -1)
+
+# Индексы ключевых точек лица (68-точечная модель)
+FACIAL_LANDMARKS_68_IDXS = {
+    "mouth": (48, 68),
+    "right_eyebrow": (17, 22),
+    "left_eyebrow": (22, 27),
+    "right_eye": (36, 42),
+    "left_eye": (42, 48),
+    "nose": (27, 35),
+    "jaw": (0, 17)
+}
+
+# Расширенные индексы для детального анализа
+DETAILED_LANDMARKS_MAPPING = {
+    "outer_jaw": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    "right_eyebrow": [17, 18, 19, 20, 21],
+    "left_eyebrow": [22, 23, 24, 25, 26],
+    "nose_bridge": [27, 28, 29, 30],
+    "nose_tip": [31, 32, 33, 34, 35],
+    "right_eye": [36, 37, 38, 39, 40, 41],
+    "left_eye": [42, 43, 44, 45, 46, 47],
+    "outer_mouth": [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59],
+    "inner_mouth": [60, 61, 62, 63, 64, 65, 66, 67]
+}
+
+# Индексы для расчета метрик идентичности
+EYE_CORNERS = [36, 39, 42, 45]  # Внешние углы глаз
+NOSE_TIP = 30
+MOUTH_CORNERS = [48, 54]
+CHIN_POINT = 8
+FOREHEAD_POINTS = [19, 24]  # Брови для оценки лба
+
+# Пороги для валидации
+CONFIDENCE_THRESHOLD = 0.8
+POSE_ANGLE_LIMITS = {
+    'yaw': (-90, 90),
+    'pitch': (-60, 60),
+    'roll': (-45, 45)
+}
+
+# Параметры для анализа качества
+QUALITY_THRESHOLDS = {
+    'min_face_size': 80,
+    'max_face_size': 600,
+    'min_landmarks_confidence': 0.7,
+    'max_pose_deviation': 45.0,
+    'min_eye_distance': 20,
+    'max_eye_distance': 200
+}
+
+# Параметры для плотной поверхности
+DENSE_SURFACE_PARAMS = {
+    'enable_dense_extraction': True,
+    'dense_points_limit': 38365,
+    'surface_smoothing': True,
+    'texture_mapping': True
+}
+
+# === СТРУКТУРЫ ДАННЫХ ===
+
+@dataclass
+class LandmarksPackage:
+    """Пакет данных с результатами 3D-анализа лица"""
+    image_id: str
+    filepath: str
+    landmarks_68: np.ndarray  # 68x3 координаты
+    landmarks_confidence: float
+    pose_angles: Dict[str, float]  # yaw, pitch, roll
+    pose_category: str
+    bbox: Tuple[int, int, int, int]  # x, y, w, h
     
-    HAS_3DDFA = True
-    logger.info("3DDFA компоненты успешно импортированы")
+    # Нормализованные данные
+    normalized_landmarks: Optional[np.ndarray] = None
+    scale_factor: float = 1.0
+    reference_distance: float = 0.0
     
-except ImportError as e:
-    HAS_3DDFA = False
-    logger.error(f"Ошибка импорта 3DDFA: {e}")
-    logger.warning("Используется заглушка для 3DDFA")
+    # Дополнительные метрики
+    shape_error: float = 0.0
+    eye_region_error: float = 0.0
+    dense_vertices: Optional[np.ndarray] = None  # 38365x3 для полной поверхности
+    dense_triangles: Optional[np.ndarray] = None  # Треугольники меша
+    
+    # Детальные анализы
+    landmarks_visibility: Optional[np.ndarray] = None  # Видимость каждой точки
+    landmarks_quality_scores: Optional[np.ndarray] = None  # Качество каждой точки
+    pose_stability_score: float = 0.0
+    facial_symmetry_score: float = 0.0
+    
+    # Метаданные обработки
+    processing_time_ms: float = 0.0
+    memory_usage_mb: float = 0.0
+    extraction_method: str = "3DDFA_V2"
+    device_used: str = "cpu"
+    model_version: str = ""
+    
+    # Флаги качества
+    quality_flags: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    
+    # Кэш-информация
+    cache_key: Optional[str] = None
+    cache_timestamp: Optional[datetime.datetime] = None
 
-# ==================== Инициализация 3DDFA компонентов (отдельная функция) ====================
-def initialize_3ddfa_components(model_dir: str, skip_gpu_check: bool = False) -> Dict[str, Any]:
-    """
-    Инициализация 3DDFA компонентов.
-    Проверяет доступность GPU и загружает необходимые модели (FaceBoxes, TDDFA).
-    """
-    # Убрана критическая проверка GPU, позволяем системе использовать CPU, если CUDA недоступна
+@dataclass
+class Face3DModelConfig:
+    """Конфигурация 3D-модели лица"""
+    model_path: str
+    bfm_path: str
+    device: str = "cpu"
+    use_mps: bool = False
+    batch_size: int = 1
+    enable_dense_mesh: bool = True
+    enable_texture_extraction: bool = True
+    enable_pose_estimation: bool = True
+    enable_expression_analysis: bool = True
 
-    try:
-        logger.info("Начало инициализации 3DDFA компонентов")
-        
-        # Определяем устройство для вычислений
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        logger.info(f"Использование устройства: {device}")
-        
-        # Инициализация FaceBoxes
-        face_boxes = FaceBoxesDetector() # ИСПРАВЛЕНО: Убраны пороги чувствительности, т.к. они глобальные
-        logger.info("FaceBoxes инициализирован")
-        
-        # Инициализация TDDFA
-        # Используем пути к моделям из REQUIRED_3DDFA_FILES
-        tddfa = TDDFA_ONNX( # Изменено на TDDFA_ONNX
-            gpu_mode=(device == 'cuda'), # Устанавливаем gpu_mode на основе обнаруженного устройства
-            bfm_fp=str(REQUIRED_3DDFA_FILES["bfm_model"]),
-            size=120, # Возвращаем size=120, т.к. TDDFA_ONNX ожидает этот размер
-            arch='mobilenet_v1', # Известная архитектура для mb1
-            num_params=62,
-            widen_factor=1,
-            checkpoint_fp=str(REQUIRED_3DDFA_FILES["weights"]) # Передаем путь к весам
-        )
-        logger.info(f"TDDFA ({device.upper()}) инициализирован")
-        
-        logger.info("3DDFA компоненты успешно инициализированы")
-        return dict(tddfa=tddfa, face_boxes=face_boxes)
-        
-    except Exception as e:
-        logger.error(f"Ошибка инициализации 3DDFA компонентов: {e}")
-        raise # Проброс ошибки инициализации
+@dataclass
+class PoseEstimationResult:
+    """Результат оценки позы лица"""
+    yaw: float
+    pitch: float
+    roll: float
+    rotation_matrix: np.ndarray
+    translation_vector: np.ndarray
+    pose_confidence: float
+    pose_category: str
+    stability_score: float
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+@dataclass
+class FaceQualityAssessment:
+    """Оценка качества лица для анализа"""
+    overall_quality: float
+    face_size_score: float
+    pose_score: float
+    lighting_score: float
+    blur_score: float
+    occlusion_score: float
+    symmetry_score: float
+    quality_flags: List[str]
+    recommendations: List[str]
 
-def calculate_distance(p1: np.ndarray, p2: np.ndarray) -> float:
-    """Расчет евклидова расстояния между двумя точками"""
-    try:
-        return euclidean(p1, p2)
-    except Exception as e:
-        logger.error(f"Ошибка расчета расстояния: {e}")
-        return 0.0
-
-def calculate_angle(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> float:
-    """Расчет угла между тремя точками (p2 - вершина)"""
-    try:
-        vec1 = p1 - p2
-        vec2 = p3 - p2
-        
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        
-        cosine_angle = np.dot(vec1, vec2) / (norm1 * norm2)
-        cosine_angle = np.clip(cosine_angle, -1.0, 1.0)
-        angle = np.degrees(np.arccos(cosine_angle))
-        
-        return angle
-    except Exception as e:
-        logger.error(f"Ошибка расчета угла: {e}")
-        return 0.0
-
-def mirror_landmarks(landmarks: np.ndarray, center_x: float) -> np.ndarray:
-    """Отражение ландмарок относительно центральной оси X"""
-    try:
-        mirrored = landmarks.copy()
-        mirrored[:, 0] = 2 * center_x - mirrored[:, 0]
-        return mirrored
-    except Exception as e:
-        logger.error(f"Ошибка отражения ландмарок: {e}")
-        return landmarks
-
-def fit_curve_to_points(points: np.ndarray) -> float:
-    """Аппроксимация кривой по точкам"""
-    try:
-        if len(points) < 2:
-            return 0.0
-        
-        x = points[:, 0]
-        y = points[:, 1]
-        
-        coefficients = np.polyfit(x, y, min(2, len(points) - 1))
-        return np.sum(np.abs(coefficients))
-    except Exception as e:
-        logger.error(f"Ошибка аппроксимации кривой: {e}")
-        return 0.0
-
-def rotate_to_target_angles(landmarks: np.ndarray, target_angles: Tuple[float, float, float]) -> np.ndarray:
-    """
-    ИСПРАВЛЕНО: Поворот ландмарок к целевым углам (pitch, yaw, roll)
-    Согласно правкам: добавлена функция target_angles
-    """
-    try:
-        pitch, yaw, roll = target_angles
-        logger.info(f"Поворот к целевым углам: pitch={pitch}, yaw={yaw}, roll={roll}")
-        
-        # Матрицы поворота
-        pitch_rad = np.radians(pitch)
-        yaw_rad = np.radians(yaw)
-        roll_rad = np.radians(roll)
-        
-        # Матрица поворота по X (pitch)
-        R_x = np.array([
-            [1, 0, 0],
-            [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
-            [0, np.sin(pitch_rad), np.cos(pitch_rad)]
-        ])
-        
-        # Матрица поворота по Y (yaw)
-        R_y = np.array([
-            [np.cos(yaw_rad), 0, np.sin(yaw_rad)],
-            [0, 1, 0],
-            [-np.sin(yaw_rad), 0, np.cos(yaw_rad)]
-        ])
-        
-        # Матрица поворота по Z (roll)
-        R_z = np.array([
-            [np.cos(roll_rad), -np.sin(roll_rad), 0],
-            [np.sin(roll_rad), np.cos(roll_rad), 0],
-            [0, 0, 1]
-        ])
-        
-        # Комбинированная матрица поворота
-        R = R_z @ R_y @ R_x
-        
-        # Применение поворота к ландмаркам
-        rotated_landmarks = landmarks @ R.T
-        
-        logger.info(f"Поворот ландмарок выполнен успешно")
-        return rotated_landmarks
-        
-    except Exception as e:
-        logger.error(f"Ошибка поворота к целевым углам: {e}")
-        return landmarks
-
-# ==================== ОСНОВНОЙ КЛАСС ====================
+# === ОСНОВНОЙ КЛАСС 3D-АНАЛИЗАТОРА ===
 
 class Face3DAnalyzer:
-    """
-    Анализатор 3D лиц с полной функциональностью
-    ИСПРАВЛЕНО: Все критические ошибки согласно правкам
-    """
+    """Анализатор для извлечения 3D-ландмарков и определения позы лица"""
     
-    IOD_HISTORY_SIZE = 100
-    
-    def __init__(self, tddfa_model: Any = None, face_boxes_model: Any = None):
-        """Инициализация анализатора"""
-        logger.info("Инициализация Face3DAnalyzer")
+    def __init__(self):
+        self.config = get_config()
+        self.cache_dir = Path("./cache/face_3d")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Модели 3DDFA (теперь инициализируются и передаются извне)
-        self.tddfa = tddfa_model
-        self.faceboxes = face_boxes_model
+        # Конфигурация модели
+        self.model_config = Face3DModelConfig(
+            model_path=self.config.get_model_path("3ddfa_v2"),
+            bfm_path="./models/BFM",
+            device="mps" if torch.backends.mps.is_available() else "cpu",
+            use_mps=torch.backends.mps.is_available()
+        )
         
-        # ИСПРАВЛЕНО: Добавлена поддержка dense surface points (38000 точек)
-        self.dense_face_model = None
+        # Модели и компоненты
+        self.face_detector = None
+        self.ddfa_model = None
+        self.bfm_model = None
+        self.triangles = None
+        self.texture_extractor = None
         
-        # Референсная модель для shape error
-        self.reference_model_landmarks = None
-        if self.tddfa: # Load reference model if tddfa is provided
-            self._load_reference_model()
-        else:
-            logger.warning("TDDFA модель не предоставлена, референсная модель не будет загружена.")
+        # Кэш результатов
+        self.landmarks_cache: Dict[str, LandmarksPackage] = {}
+        self.cache_size_mb = 0.0
+        self.max_cache_size_mb = 1024  # 1GB лимит
         
-        # Параметры для 3DDFA (теперь с CAMERA_BOX_FRONT_SIZE_FACTOR)
-        self.camera_box_size_factor = CAMERA_BOX_FRONT_SIZE_FACTOR # Используем новую константу
+        # Статистика
+        self.processing_stats = {
+            'total_processed': 0,
+            'successful_extractions': 0,
+            'failed_extractions': 0,
+            'cache_hits': 0,
+            'subpixel_corrections': 0,
+            'dense_mesh_extractions': 0,
+            'pose_estimations': 0
+        }
         
-        # Конфигурации видов
-        self.view_configs = get_view_configs()
+        # Пулы для параллельной обработки
+        self.thread_pool = ThreadPoolExecutor(max_workers=4)
+        self.processing_lock = threading.Lock()
         
-        # Метрики идентичности (15 метрик)
-        self.identity_metrics = get_identity_signature_metrics()
+        # Инициализация компонентов
+        self._initialize_components()
         
-        # Устройство вычислений
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
-        # Флаг инициализации
-        self.init_done = (self.tddfa is not None and self.faceboxes is not None)
-        
-        logger.info("Face3DAnalyzer инициализирован")
-        self.iod_history = collections.deque(maxlen=self.IOD_HISTORY_SIZE)
+        logger.info(f"Face3DAnalyzer инициализирован (устройство: {self.model_config.device})")
 
-    def _load_reference_model(self) -> None:
-        """Загрузка референсной модели BFM для расчета shape error"""
+    def _initialize_components(self):
+        """Инициализация всех компонентов 3DDFA_V2"""
         try:
-            if self.tddfa and hasattr(self.tddfa, 'bfm'):
-                bfm = self.tddfa.bfm
-                if hasattr(bfm, 'shapeMU') and hasattr(bfm, 'landmarksIdx'):
-                    shape_mu = bfm.shapeMU
-                    landmarks_idx = bfm.landmarksIdx
-                    
-                    if hasattr(shape_mu, 'cpu'):
-                        shape_mu = shape_mu.cpu().numpy()
-                    if hasattr(landmarks_idx, 'cpu'):
-                        landmarks_idx = landmarks_idx.cpu().numpy()
-                    
-                    self.reference_model_landmarks = shape_mu[landmarks_idx, :].reshape(-1, 3)
-                    logger.info("Референсная модель BFM загружена")
-                else:
-                    logger.warning("BFM модель не содержит необходимые компоненты (shapeMU или landmarksIdx).")
+            # Инициализация детектора лиц
+            self._initialize_face_detector()
+            
+            # Инициализация 3DDFA модели
+            self._initialize_3ddfa_model()
+            
+            # Инициализация BFM модели
+            self._initialize_bfm_model()
+            
+            # Инициализация экстрактора текстур
+            self._initialize_texture_extractor()
+            
+            logger.info("Все компоненты 3DDFA_V2 успешно инициализированы")
+            
+        except Exception as e:
+            logger.error(f"Ошибка инициализации компонентов: {e}")
+            raise
+
+    def _initialize_face_detector(self):
+        """Инициализация детектора лиц FaceBoxes"""
+        try:
+            # Попытка импорта FaceBoxes из 3DDFA_V2
+            sys.path.append('./models/3DDFA_V2')
+            try:
+                from FaceBoxes import FaceBoxes
+                self.face_detector = FaceBoxes()
+                logger.debug("FaceBoxes детектор инициализирован")
+            except ImportError:
+                logger.warning("FaceBoxes недоступен, используется fallback")
+                self._initialize_opencv_detector()
+            
+        except Exception as e:
+            logger.error(f"Ошибка инициализации FaceBoxes: {e}")
+            self._initialize_opencv_detector()
+
+    def _initialize_opencv_detector(self):
+        """Fallback инициализация OpenCV детектора"""
+        try:
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            if os.path.exists(cascade_path):
+                self.face_detector = cv2.CascadeClassifier(cascade_path)
+                logger.warning("Используется OpenCV Haar Cascade как fallback детектор")
             else:
-                logger.warning("TDDFA модель не инициализирована или не содержит BFM для загрузки референсной модели.")
+                # Альтернативный путь для некоторых систем
+                alt_cascade_path = '/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml'
+                if os.path.exists(alt_cascade_path):
+                    self.face_detector = cv2.CascadeClassifier(alt_cascade_path)
+                else:
+                    raise FileNotFoundError("Не найден файл каскада Haar")
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка инициализации детектора: {e}")
+            raise
+
+    def _initialize_3ddfa_model(self):
+        """Инициализация основной модели 3DDFA_V2"""
+        try:
+            # Импорт модели из 3DDFA_V2
+            sys.path.append('./models/3DDFA_V2')
+            from TDDFA import TDDFA
+            
+            # Конфигурация модели
+            cfg = {
+                'arch': 'mobilenet_v1',
+                'checkpoint_fp': self.model_config.model_path,
+                'bfm_fp': os.path.join(self.model_config.bfm_path, 'BFM_model_front.mat'),
+                'size': 120,
+                'device': self.model_config.device
+            }
+            
+            # Проверка существования файлов
+            if not os.path.exists(cfg['checkpoint_fp']):
+                raise FileNotFoundError(f"Модель 3DDFA не найдена: {cfg['checkpoint_fp']}")
+            
+            if not os.path.exists(cfg['bfm_fp']):
+                logger.warning(f"BFM файл не найден: {cfg['bfm_fp']}")
+            
+            self.ddfa_model = TDDFA(cfg)
+            self.model_config.model_version = "3DDFA_V2_MobileNet"
+            logger.debug("3DDFA модель инициализирована")
+            
+        except Exception as e:
+            logger.error(f"Ошибка инициализации 3DDFA модели: {e}")
+            raise
+
+    def _initialize_bfm_model(self):
+        """Инициализация Basel Face Model"""
+        try:
+            # Загрузка BFM параметров
+            bfm_path = os.path.join(self.model_config.bfm_path, 'BFM_model_front.mat')
+            if os.path.exists(bfm_path):
+                from scipy.io import loadmat
+                bfm_data = loadmat(bfm_path)
+                
+                self.bfm_model = {
+                    'shapeMU': bfm_data.get('shapeMU'),
+                    'shapePC': bfm_data.get('shapePC'),
+                    'shapeEV': bfm_data.get('shapeEV'),
+                    'texMU': bfm_data.get('texMU'),
+                    'texPC': bfm_data.get('texPC'),
+                    'texEV': bfm_data.get('texEV'),
+                    'expPC': bfm_data.get('expPC'),  # Коэффициенты выражений
+                    'expEV': bfm_data.get('expEV')
+                }
+                
+                # Загрузка треугольников для меша
+                tri_path = os.path.join(self.model_config.bfm_path, 'tri.mat')
+                if os.path.exists(tri_path):
+                    tri_data = loadmat(tri_path)
+                    self.triangles = tri_data['tri'] - 1  # Matlab to Python indexing
+                
+                logger.debug("BFM модель загружена")
+            else:
+                logger.warning(f"BFM файл не найден: {bfm_path}")
+                self.bfm_model = None
                 
         except Exception as e:
-            logger.error(f"Ошибка загрузки референсной модели: {e}")
-            self.reference_model_landmarks = None
+            logger.error(f"Ошибка загрузки BFM модели: {e}")
+            self.bfm_model = None
 
-    def extract_68_landmarks_with_confidence(self, img: np.ndarray, models: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Извлечение 68 3D-ландмарок лица с оценкой достоверности.
-        ИСПРАВЛЕНО: Добавлена субпиксельная доводка и коррекция осей.
-        """
+    def _initialize_texture_extractor(self):
+        """Инициализация экстрактора текстур"""
         try:
-            logger.debug(f"[extract_68_landmarks] Начало. Размер изображения: {img.shape}, Тип: {img.dtype}")
-            
-            # ИСПРАВЛЕНО (Пункт 17): Убедимся, что изображение в формате BGR
-            if img.ndim == 2: # Если изображение в оттенках серого
-                img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            elif img.shape[2] == 4: # Если изображение с альфа-каналом (RGBA)
-                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-            else:
-                img_bgr = img.copy() # Просто копия, если уже BGR или другого 3-канального формата
-
-            # 2. Запускаем FaceBoxes НА ПОЛНОМ кадре
-            boxes = models["face_boxes"](img_bgr) # список [[xmin, ymin, xmax, ymax, score]]
-
-            # ИСПРАВЛЕНО (Пункт 3): Проверка на отсутствие лиц и выброс исключения
-            if len(boxes) == 0:
-                logger.error("FaceBoxes: 0 лиц обнаружено – тестовое фото непригодно.")
-                raise RuntimeError("FaceBoxes: 0 лиц — тестовое фото непригодно")
-
-            # ИСПРАВЛЕНО: Преобразуем список в массив NumPy, если это список
-            if not isinstance(boxes, np.ndarray):
-                boxes = np.array(boxes)
-            
-            logger.debug(f"[extract_68_landmarks] FaceBoxes вернул: {len(boxes) if isinstance(boxes, np.ndarray) else boxes} боксов. Тип: {type(boxes)}")
-            logger.debug(f"[extract_68_landmarks] Содержимое boxes (первые 5): {boxes[:5] if isinstance(boxes, np.ndarray) and boxes.size > 0 else boxes}")
-            if len(boxes) == 0:
-                logger.error("FaceBoxes: 0 лиц обнаружено – проверьте изображение и освещение")
-                return np.array([]), np.array([]), np.array([])  # Возвращаем пустые массивы
-
-            # 3. Если найден хотя бы один bbox → делаем crop
-            # Исправлено: Сортировка по площади и взятие первого элемента
-            boxes_sorted = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
-            box = boxes_sorted[0]
-
-            x1, y1, x2, y2 = map(int, box[:4]) # отсекаем score
-
-            logger.debug(f"[extract_68_landmarks] Выбранный бокс: [{x1}, {y1}, {x2}, {y2}]")
-
-            # --- ИСПРАВЛЕНО: Отказ от ROI и передача полного кадра в TDDFA ---
-            # Вместо roi и roi_120, передаем полный кадр и bbox в int32
-            box_arr = np.array([[x1, y1, x2, y2]], dtype=np.int32)
-            param_lst, roi_box_lst = models["tddfa"](img, box_arr)
-
-            # Проверка, что ландмарки были успешно обнаружены
-            if not param_lst or not roi_box_lst:
-                logger.warning("3DDFA не обнаружил ландмарки для данного лица. Возврат пустых данных.")
-                return np.array([]), np.array([]), np.array([])
-
-            # ИСПРАВЛЕНО: Убедимся, что param_lst[0] и roi_box_lst[0] являются массивами numpy
-            # Если tddfa возвращает torch.Tensor, detach().cpu().numpy() должен быть использован
-            # Однако, для универсальности, используем np.asarray, если это не np.ndarray
-            if not isinstance(param_lst[0], np.ndarray):
-                try:
-                    # Попытка преобразовать из torch.Tensor, если это так
-                    if hasattr(param_lst[0], 'detach') and hasattr(param_lst[0], 'cpu') and hasattr(param_lst[0], 'numpy'):
-                        param_lst[0] = param_lst[0].detach().cpu().numpy()
-                    else:
-                        param_lst[0] = np.asarray(param_lst[0])
-                except Exception as convert_e:
-                    logger.error(f"Не удалось преобразовать param_lst[0] в numpy: {convert_e}. Тип: {type(param_lst[0])}")
-                    return np.array([]), np.array([]), np.array([])
-
-            if not isinstance(roi_box_lst[0], np.ndarray):
-                try:
-                    # Попытка преобразовать из torch.Tensor, если это так
-                    if hasattr(roi_box_lst[0], 'detach') and hasattr(roi_box_lst[0], 'cpu') and hasattr(roi_box_lst[0], 'numpy'):
-                        roi_box_lst[0] = roi_box_lst[0].detach().cpu().numpy()
-                    else:
-                        roi_box_lst[0] = np.asarray(roi_box_lst[0])
-                except Exception as convert_e:
-                    logger.error(f"Не удалось преобразовать roi_box_lst[0] в numpy: {convert_e}. Тип: {type(roi_box_lst[0])}")
-                    return np.array([]), np.array([]), np.array([])
-
-            # ИСПРАВЛЕНО: Добавим проверку перед доступом к .shape в отладочных сообщениях
-            if isinstance(param_lst[0], np.ndarray) and hasattr(param_lst[0], 'shape'):
-                logger.debug(f"[extract_68_landmarks] TDDFA param_lst[0] shape: {param_lst[0].shape}")
-            else:
-                logger.error(f"[extract_68_landmarks] TDDFA param_lst[0] не является np.ndarray или не имеет атрибута 'shape'. Тип: {type(param_lst[0])}")
-                return np.array([]), np.array([]), np.array([])
-
-            if isinstance(roi_box_lst[0], np.ndarray) and hasattr(roi_box_lst[0], 'shape'):
-                logger.debug(f"[extract_68_landmarks] TDDFA roi_box_lst[0] shape: {roi_box_lst[0].shape}")
-            else:
-                logger.error(f"[extract_68_landmarks] TDDFA roi_box_lst[0] не является np.ndarray или не имеет атрибута 'shape'. Тип: {type(roi_box_lst[0])}")
-                return np.array([]), np.array([]), np.array([])
-            
-            # ----- ИСПРАВЛЕНО: Использование P, pose = calc_pose(param_lst[0]) для получения углов и матрицы проекции -----
-            # parse_param возвращает P (матрицу проекции), pose (углы), landmarks_2d (68, 2)
-            # _, pose_from_param, landmarks_2d_proj = parse_param(param_lst[0], roi_box_lst[0]) # УДАЛЕНО
-            
-            # Получаем 3D реконструированные вершины (в пространстве модели) для Z-координат
-            vers_lst = models["tddfa"].recon_vers(param_lst, roi_box_lst)
-            # ИСПРАВЛЕНО: Проверка на пустой vers_lst и явное преобразование в numpy
-            if not vers_lst:
-                logger.error("TDDFA вернул пустой vers_lst (0 точек) после recon_vers. Невозможно получить 3D данные.")
-                raise RuntimeError("TDDFA вернул пустой список вершин") # Пункт 1: пустой vers_lst
-
-            first_3d_ver = vers_lst[0]
-            if isinstance(first_3d_ver, torch.Tensor):
-                first_3d_ver = first_3d_ver.detach().cpu().numpy()
-            elif not isinstance(first_3d_ver, np.ndarray):
-                first_3d_ver = np.asarray(first_3d_ver)
-            
-            # landmarks_3d_reconstructed будет (68, 3) из (3, 68)
-            landmarks_3d_reconstructed = first_3d_ver.T.astype(np.float32)
-
-            # Составляем финальные `landmarks` (68, 3) используя X,Y из реконструированных 3D (они уже в пиксельных координатах)
-            landmarks = landmarks_3d_reconstructed # Теперь landmarks уже (68,3) в нужных координатах
-            landmarks_2d_proj = landmarks[:, :2] # Для IOD контроля берем 2D проекцию
-
-            # Debugging IOD calculation
-            logger.debug(f"[extract_68_landmarks] landmarks_2d_proj[36,:]: {landmarks_2d_proj[36,:]}")
-            logger.debug(f"[extract_68_landmarks] landmarks_2d_proj[45,:]: {landmarks_2d_proj[45,:]}")
-            
-            # ИСПРАВЛЕНО: Для IOD ratio используем roi_box_lst[0] - это [xmin, ymin, xmax, ymax, score]
-            roi_box = roi_box_lst[0]
-            roi_width = roi_box[2] - roi_box[0]
-            roi_width = max(roi_width, 1e-5)  # Защита от деления на ноль
-            iod_ratio = np.linalg.norm(landmarks_2d_proj[36,:] - landmarks_2d_proj[45,:]) / roi_width
-            self.iod_history.append(iod_ratio)
-            if len(self.iod_history) >= 10:
-                median_iod = float(np.median(self.iod_history))
-                std_iod = float(np.std(self.iod_history))
-                dynamic_min = max(0.05, median_iod - 2 * std_iod)
-                dynamic_max = min(1.5, median_iod + 2 * std_iod)
-                if not (dynamic_min < iod_ratio < dynamic_max):
-                    logger.warning(f"[extract_68_landmarks_with_confidence] IOD ratio: {iod_ratio:.3f} — значение вне динамического диапазона ({dynamic_min:.3f} < IOD < {dynamic_max:.3f}), медиана={median_iod:.3f}, std={std_iod:.3f}")
-            else:
-                if not (IOD_RATIO_MIN < iod_ratio < IOD_RATIO_MAX):
-                    logger.warning(f"[extract_68_landmarks_with_confidence] IOD ratio: {iod_ratio:.3f} — значение вне рекомендуемого диапазона ({IOD_RATIO_MIN} < IOD < {IOD_RATIO_MAX}), но анализ продолжается. Возможно, требуется калибровка.")
-            # assert 0.2 < iod_ratio < 0.5, f"IOD ratio abnormal: {iod_ratio:.3f}"  # УБРАНО! Теперь только предупреждение
-            
-            # Оценка достоверности ландмарок (на основе отклонения от референсной модели)
-            # ИСПРАВЛЕНО: Используем новую логику оценки качества
-            quality_score = self._calculate_landmark_quality(landmarks, roi_width) # Передаем roi_width
-            confidence_array = np.full(landmarks.shape[0], quality_score) # Теперь возвращает массив для каждой точки
-            
-            # Оценка позы
-            # ИСПРАВЛЕНО: передаем param_lst[0] и confidence_array в determine_precise_face_pose
-            # calc_pose уже вызывается внутри determine_precise_face_pose, передаем только param
-            pose_info = self.determine_precise_face_pose(landmarks, param_lst[0], confidence_array)
-            
-            return landmarks, confidence_array, param_lst[0] # Возвращаем param_lst[0] вместо pose_category
-            
-        except Exception as e:
-            logger.error(f"[extract_68_landmarks] Ошибка извлечения ландмарок: {e}")
-            return np.array([]), np.array([]), np.array([])
-
-    def extract_dense_surface_points(self, img: np.ndarray, models: Dict[str, Any]) -> np.ndarray:
-        """
-        Извлечение плотных точек поверхности (приблизительно 38000 точек).
-        """
-        face_boxes = models.get("face_boxes")
-        tddfa = models.get("tddfa")
-        
-        if face_boxes is None or tddfa is None:
-            logger.error("Модели FaceBoxes или TDDFA не переданы.")
-            raise RuntimeError("Неинициализированные модели FaceBoxes или TDDFA")
-        
-        try:
-            logger.info(f"Извлечение плотных точек поверхности из изображения {img.shape}")
-            
-            # Детекция лиц
-            boxes = face_boxes(img)
-            
-            if not isinstance(boxes, np.ndarray):
-                boxes = np.array(boxes)
-            
-            if len(boxes) == 0:
-                logger.warning("Лица не обнаружены")
-                return np.array([])
-            
-            # Выбор лучшего лица
-            best_box = boxes[np.argmax((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]))]
-            
-            # Извлечение параметров
-            param_lst, roi_box_lst = tddfa(img, [best_box])
-            
-            # Реконструкция с dense_flag=True для получения 38000 точек
-            dense_ver_lst = tddfa.recon_vers(param_lst, roi_box_lst, dense_flag=True)
-            dense_ver = dense_ver_lst[0] # (3, ~38000)
-            
-            if not isinstance(dense_ver, np.ndarray):
-                dense_ver = dense_ver.detach().cpu().numpy()
-            
-            # Коррекция осей: X и Y инвертированы
-            dense_ver[0, :] = -dense_ver[0, :]
-            dense_ver[1, :] = -dense_ver[1, :]
-            dense_points = dense_ver.T.astype(np.float32) # (N, 3) и float32
-            
-            # Фильтрация по MIN_VISIBILITY_Z
-            if MIN_VISIBILITY_Z is not None:
-                visible_mask = dense_points[:, 2] > MIN_VISIBILITY_Z
-                dense_points = dense_points[visible_mask]
-                logger.info(f"Отфильтровано {np.sum(~visible_mask)} невидимых точек")
-            
-            logger.info(f"Извлечено {len(dense_points)} плотных точек поверхности")
-            
-            return dense_points
-            
-        except Exception as e:
-            logger.error(f"Ошибка извлечения плотных точек: {e}")
-            return np.array([])
-
-    def determine_precise_face_pose(self, landmarks_3d: np.ndarray, param: np.ndarray, confidence_array: np.ndarray) -> Dict[str, Any]:
-        if (
-            landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0 or
-            param is None or not hasattr(param, 'size') or param.size == 0 or
-            confidence_array is None or not hasattr(confidence_array, 'size') or confidence_array.size == 0
-        ):
-            logger.warning("Один из входных массивов пустой или None (landmarks_3d, param, confidence_array). Пропуск.")
-            return None
-        """
-        Определение точной позы лица с использованием 3DMM параметров.
-        ИСПРАВЛЕНО: Использование matrix2angle для получения углов и доверия.
-        """
-        try:
-            if landmarks_3d.size == 0 or param.size == 0 or confidence_array.size == 0:
-                return {
-                    "pose_category": "Unknown",
-                    "angles": (0.0, 0.0, 0.0),
-                    "confidence": 0.0,
-                    "details": "No landmarks, parameters, or confidence available"
+            if self.model_config.enable_texture_extraction:
+                # Простой экстрактор текстур на основе UV-маппинга
+                self.texture_extractor = {
+                    'uv_coords': None,
+                    'texture_size': (256, 256),
+                    'interpolation': cv2.INTER_LINEAR
                 }
+                logger.debug("Экстрактор текстур инициализирован")
             
-            logger.info("Определение точной позы лица")
-            
-            # ИСПРАВЛЕНО: Использование _parse_param для получения матрицы R и вычисление углов позы вручную
-            R, offset, alpha_shp, alpha_exp = _parse_param(param)
-            
-            # Извлечение углов Эйлера (pitch, yaw, roll) из матрицы вращения R
-            # Используем порядок углов yaw, pitch, roll для соответствия предыдущей логике
-            pitch = -np.arcsin(R[1, 2]) # Вращение вокруг X
-            roll = np.arctan2(R[0, 2], R[2, 2]) # Вращение вокруг Z
-            yaw = np.arctan2(R[1, 0], R[1, 1]) # Вращение вокруг Y
+        except Exception as e:
+            logger.warning(f"Ошибка инициализации экстрактора текстур: {e}")
+            self.texture_extractor = None
 
+    def detect_faces(self, image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """
+        Детекция лиц на изображении
+        
+        Args:
+            image: Входное изображение
+            
+        Returns:
+            Список bounding boxes в формате (x, y, w, h)
+        """
+        try:
+            if hasattr(self.face_detector, '__call__'):
+                # FaceBoxes детектор
+                bboxes = self.face_detector(image)
+                if len(bboxes) > 0:
+                    # Конвертация в формат (x, y, w, h)
+                    boxes = []
+                    for bbox in bboxes:
+                        if len(bbox) >= 4:
+                            x1, y1, x2, y2 = bbox[:4]
+                            w, h = x2 - x1, y2 - y1
+                            # Валидация размеров
+                            if (w >= QUALITY_THRESHOLDS['min_face_size'] and 
+                                w <= QUALITY_THRESHOLDS['max_face_size'] and
+                                h >= QUALITY_THRESHOLDS['min_face_size'] and 
+                                h <= QUALITY_THRESHOLDS['max_face_size']):
+                                boxes.append((int(x1), int(y1), int(w), int(h)))
+                    return boxes
+            else:
+                # OpenCV Haar Cascade
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+                faces = self.face_detector.detectMultiScale(
+                    gray, 
+                    scaleFactor=1.1, 
+                    minNeighbors=5, 
+                    minSize=(QUALITY_THRESHOLDS['min_face_size'], QUALITY_THRESHOLDS['min_face_size']),
+                    maxSize=(QUALITY_THRESHOLDS['max_face_size'], QUALITY_THRESHOLDS['max_face_size'])
+                )
+                return [tuple(face) for face in faces]
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Ошибка детекции лиц: {e}")
+            return []
+
+    def assess_face_quality(self, image: np.ndarray, bbox: Tuple[int, int, int, int], 
+                          landmarks: Optional[np.ndarray] = None) -> FaceQualityAssessment:
+        """
+        Комплексная оценка качества лица
+        
+        Args:
+            image: Входное изображение
+            bbox: Bounding box лица
+            landmarks: Ландмарки лица (опционально)
+            
+        Returns:
+            Оценка качества лица
+        """
+        try:
+            x, y, w, h = bbox
+            face_region = image[y:y+h, x:x+w]
+            
+            scores = {}
+            flags = []
+            recommendations = []
+            
+            # 1. Оценка размера лица
+            face_area = w * h
+            min_area = QUALITY_THRESHOLDS['min_face_size'] ** 2
+            max_area = QUALITY_THRESHOLDS['max_face_size'] ** 2
+            
+            if face_area < min_area:
+                scores['face_size_score'] = face_area / min_area
+                flags.append("face_too_small")
+                recommendations.append("Увеличить размер лица в кадре")
+            elif face_area > max_area:
+                scores['face_size_score'] = max_area / face_area
+                flags.append("face_too_large")
+                recommendations.append("Уменьшить размер лица в кадре")
+            else:
+                scores['face_size_score'] = 1.0
+            
+            # 2. Оценка освещения
+            gray_face = cv2.cvtColor(face_region, cv2.COLOR_BGR2GRAY) if len(face_region.shape) == 3 else face_region
+            mean_brightness = np.mean(gray_face)
+            brightness_std = np.std(gray_face)
+            
+            if mean_brightness < 50:
+                scores['lighting_score'] = mean_brightness / 50
+                flags.append("too_dark")
+                recommendations.append("Улучшить освещение")
+            elif mean_brightness > 200:
+                scores['lighting_score'] = 1.0 - (mean_brightness - 200) / 55
+                flags.append("too_bright")
+                recommendations.append("Уменьшить яркость освещения")
+            else:
+                scores['lighting_score'] = 1.0
+            
+            # 3. Оценка размытия
+            laplacian_var = cv2.Laplacian(gray_face, cv2.CV_64F).var()
+            if laplacian_var < 100:
+                scores['blur_score'] = laplacian_var / 100
+                flags.append("blurry")
+                recommendations.append("Уменьшить размытие")
+            else:
+                scores['blur_score'] = min(1.0, laplacian_var / 300)
+            
+            # 4. Оценка позы (если есть ландмарки)
+            if landmarks is not None:
+                pose_angles = self._estimate_pose_from_landmarks(landmarks)
+                max_angle = max(abs(pose_angles['yaw']), abs(pose_angles['pitch']), abs(pose_angles['roll']))
+                
+                if max_angle > QUALITY_THRESHOLDS['max_pose_deviation']:
+                    scores['pose_score'] = 1.0 - (max_angle - QUALITY_THRESHOLDS['max_pose_deviation']) / 45
+                    flags.append("extreme_pose")
+                    recommendations.append("Выровнять позу лица")
+                else:
+                    scores['pose_score'] = 1.0
+            else:
+                scores['pose_score'] = 0.8  # Нейтральная оценка без ландмарков
+            
+            # 5. Оценка окклюзии (простая проверка)
+            # Проверяем однородность яркости - большие перепады могут указывать на окклюзию
+            brightness_gradient = np.gradient(gray_face.astype(float))
+            gradient_magnitude = np.sqrt(brightness_gradient[0]**2 + brightness_gradient[1]**2)
+            occlusion_indicator = np.mean(gradient_magnitude)
+            
+            if occlusion_indicator > 50:
+                scores['occlusion_score'] = max(0.0, 1.0 - (occlusion_indicator - 50) / 100)
+                flags.append("possible_occlusion")
+                recommendations.append("Проверить наличие окклюзии")
+            else:
+                scores['occlusion_score'] = 1.0
+            
+            # 6. Оценка симметрии (если есть ландмарки)
+            if landmarks is not None:
+                symmetry_score = self._calculate_facial_symmetry(landmarks)
+                scores['symmetry_score'] = symmetry_score
+                if symmetry_score < 0.7:
+                    flags.append("asymmetric_face")
+                    recommendations.append("Проверить симметрию лица")
+            else:
+                scores['symmetry_score'] = 0.8
+            
+            # Общая оценка качества
+            overall_quality = np.mean(list(scores.values()))
+            
+            return FaceQualityAssessment(
+                overall_quality=overall_quality,
+                face_size_score=scores.get('face_size_score', 0.0),
+                pose_score=scores.get('pose_score', 0.0),
+                lighting_score=scores.get('lighting_score', 0.0),
+                blur_score=scores.get('blur_score', 0.0),
+                occlusion_score=scores.get('occlusion_score', 0.0),
+                symmetry_score=scores.get('symmetry_score', 0.0),
+                quality_flags=flags,
+                recommendations=recommendations
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка оценки качества лица: {e}")
+            return FaceQualityAssessment(
+                overall_quality=0.0,
+                face_size_score=0.0,
+                pose_score=0.0,
+                lighting_score=0.0,
+                blur_score=0.0,
+                occlusion_score=0.0,
+                symmetry_score=0.0,
+                quality_flags=["assessment_error"],
+                recommendations=["Повторить анализ"]
+            )
+
+    def _calculate_facial_symmetry(self, landmarks: np.ndarray) -> float:
+        """Расчет симметрии лица по ландмаркам"""
+        try:
+            # Используем точки левой и правой стороны лица
+            left_points = landmarks[0:9, :2]  # Левая сторона челюсти
+            right_points = landmarks[8:17, :2]  # Правая сторона челюсти
+            
+            # Центр лица (нос)
+            nose_center = landmarks[30, :2]
+            
+            # Расстояния от центра до левой и правой стороны
+            left_distances = np.linalg.norm(left_points - nose_center, axis=1)
+            right_distances = np.linalg.norm(right_points[::-1] - nose_center, axis=1)
+            
+            # Симметрия как обратная величина средней разности расстояний
+            mean_diff = np.mean(np.abs(left_distances - right_distances))
+            max_distance = np.max(np.concatenate([left_distances, right_distances]))
+            
+            if max_distance > 0:
+                symmetry_score = 1.0 - (mean_diff / max_distance)
+                return max(0.0, min(1.0, symmetry_score))
+            else:
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"Ошибка расчета симметрии: {e}")
+            return 0.0
+
+    def _estimate_pose_from_landmarks(self, landmarks: np.ndarray) -> Dict[str, float]:
+        """Быстрая оценка позы по ландмаркам"""
+        try:
+            # Простая оценка на основе геометрии ключевых точек
+            left_eye_center = np.mean(landmarks[42:48, :2], axis=0)
+            right_eye_center = np.mean(landmarks[36:42, :2], axis=0)
+            nose_tip = landmarks[30, :2]
+            
+            # Yaw (поворот влево-вправо)
+            eye_line = right_eye_center - left_eye_center
+            yaw = np.degrees(np.arctan2(eye_line[1], eye_line[0]))
+            
+            # Pitch (наклон вверх-вниз) - примерная оценка
+            eye_center = (left_eye_center + right_eye_center) / 2
+            nose_to_eye = nose_tip - eye_center
+            pitch = np.degrees(np.arctan2(nose_to_eye[1], np.linalg.norm(nose_to_eye)))
+            
+            # Roll (наклон головы)
+            roll = yaw  # Упрощенная оценка
+            
+            return {
+                'yaw': float(yaw),
+                'pitch': float(pitch),
+                'roll': float(roll)
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка оценки позы: {e}")
+            return {'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0}
+
+    def extract_68_landmarks_with_confidence(self, image: np.ndarray, 
+                                           bbox: Optional[Tuple[int, int, int, int]] = None) -> Optional[LandmarksPackage]:
+        """
+        Извлечение 68 3D-ландмарков с оценкой достоверности
+        
+        Args:
+            image: Входное изображение
+            bbox: Bounding box лица (опционально)
+            
+        Returns:
+            Пакет с ландмарками или None при ошибке
+        """
+        try:
+            start_time = time.time()
+            
+            # Генерация ID изображения
+            image_bytes = cv2.imencode('.jpg', image)[1].tobytes()
+            image_id = hashlib.sha256(image_bytes).hexdigest()
+            
+            # Проверка кэша
+            if image_id in self.landmarks_cache:
+                self.processing_stats['cache_hits'] += 1
+                cached_result = self.landmarks_cache[image_id]
+                cached_result.processing_time_ms = (time.time() - start_time) * 1000
+                return cached_result
+            
+            # Детекция лица если bbox не предоставлен
+            if bbox is None:
+                faces = self.detect_faces(image)
+                if not faces:
+                    logger.warning("Лицо не обнаружено на изображении")
+                    self.processing_stats['failed_extractions'] += 1
+                    return None
+                bbox = faces[0]  # Берем первое лицо
+            
+            # Предварительная оценка качества
+            quality_assessment = self.assess_face_quality(image, bbox)
+            if quality_assessment.overall_quality < QUALITY_THRESHOLDS['min_landmarks_confidence']:
+                logger.warning(f"Низкое качество лица для анализа: {quality_assessment.overall_quality:.3f}")
+            
+            # Подготовка изображения для 3DDFA
+            x, y, w, h = bbox
+            face_crop = image[y:y+h, x:x+w]
+            face_resized = cv2.resize(face_crop, TARGET_SIZE)
+            
+            # Извлечение параметров 3D-модели
+            if self.ddfa_model is not None:
+                param = self.ddfa_model(face_resized)
+                
+                # Извлечение 68 ландмарков
+                landmarks_68 = self._extract_landmarks_from_param(param, bbox)
+                
+                # Субпиксельная коррекция ключевых точек
+                landmarks_68_corrected = self._apply_subpixel_correction(image, landmarks_68)
+                if landmarks_68_corrected is not None:
+                    landmarks_68 = landmarks_68_corrected
+                    self.processing_stats['subpixel_corrections'] += 1
+                
+                # Определение позы
+                pose_result = self._calculate_detailed_pose_from_param(param, landmarks_68)
+                
+                # Классификация категории позы
+                pose_category = self._determine_pose_category(pose_result.yaw, pose_result.pitch, pose_result.roll)
+                
+                # Расчет достоверности
+                confidence = self._calculate_landmarks_confidence(landmarks_68, image, bbox)
+                
+                # Расчет ошибок формы
+                shape_error, eye_region_error = self._calculate_shape_errors(landmarks_68)
+                
+                # Извлечение плотной поверхности (если включено)
+                dense_vertices = None
+                dense_triangles = None
+                if (self.model_config.enable_dense_mesh and 
+                    self.bfm_model is not None and 
+                    DENSE_SURFACE_PARAMS['enable_dense_extraction']):
+                    dense_vertices, dense_triangles = self._extract_dense_surface(param)
+                    if dense_vertices is not None:
+                        self.processing_stats['dense_mesh_extractions'] += 1
+                
+                # Анализ видимости и качества точек
+                landmarks_visibility = self._analyze_landmarks_visibility(landmarks_68, image, bbox)
+                landmarks_quality_scores = self._calculate_landmarks_quality_scores(landmarks_68, image)
+                
+                # Расчет стабильности позы
+                pose_stability_score = self._calculate_pose_stability(pose_result)
+                
+                # Расчет симметрии лица
+                facial_symmetry_score = self._calculate_facial_symmetry(landmarks_68)
+                
+                # Создание пакета результатов
+                package = LandmarksPackage(
+                    image_id=image_id,
+                    filepath="",  # Будет заполнено вызывающей функцией
+                    landmarks_68=landmarks_68,
+                    landmarks_confidence=confidence,
+                    pose_angles={
+                        'yaw': pose_result.yaw,
+                        'pitch': pose_result.pitch,
+                        'roll': pose_result.roll
+                    },
+                    pose_category=pose_category,
+                    bbox=bbox,
+                    shape_error=shape_error,
+                    eye_region_error=eye_region_error,
+                    dense_vertices=dense_vertices,
+                    dense_triangles=dense_triangles,
+                    landmarks_visibility=landmarks_visibility,
+                    landmarks_quality_scores=landmarks_quality_scores,
+                    pose_stability_score=pose_stability_score,
+                    facial_symmetry_score=facial_symmetry_score,
+                    processing_time_ms=(time.time() - start_time) * 1000,
+                    memory_usage_mb=psutil.Process().memory_info().rss / (1024 * 1024),
+                    device_used=self.model_config.device,
+                    model_version=self.model_config.model_version,
+                    cache_key=image_id,
+                    cache_timestamp=datetime.datetime.now()
+                )
+                
+                # Валидация результата
+                self._validate_landmarks_package(package)
+                
+                # Сохранение в кэш
+                self._save_to_cache(image_id, package)
+                self.processing_stats['successful_extractions'] += 1
+                self.processing_stats['total_processed'] += 1
+                self.processing_stats['pose_estimations'] += 1
+                
+                logger.debug(f"Ландмарки извлечены за {package.processing_time_ms:.1f}мс")
+                return package
+            
+            else:
+                logger.error("3DDFA модель не инициализирована")
+                self.processing_stats['failed_extractions'] += 1
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка извлечения ландмарков: {e}")
+            self.processing_stats['failed_extractions'] += 1
+            self.processing_stats['total_processed'] += 1
+            return None
+
+    def _extract_landmarks_from_param(self, param: np.ndarray, bbox: Tuple[int, int, int, int]) -> np.ndarray:
+        """Извлечение 68 ландмарков из параметров 3DDFA"""
+        try:
+            # Реконструкция 3D-вершин из параметров
+            if self.ddfa_model is not None:
+                vertices = self.ddfa_model.recon_vers(param, roi_box=bbox)
+                
+                # Извлечение 68 ключевых точек
+                landmarks_68 = vertices[:68]  # Первые 68 точек - это ландмарки
+                
+                return landmarks_68
+            else:
+                raise ValueError("3DDFA модель не инициализирована")
+                
+        except Exception as e:
+            logger.error(f"Ошибка извлечения ландмарков из параметров: {e}")
+            raise
+
+    def _apply_subpixel_correction(self, image: np.ndarray, landmarks: np.ndarray) -> Optional[np.ndarray]:
+        """Применение субпиксельной коррекции к ключевым точкам"""
+        try:
+            # Конвертация в grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+            
+            # Применение cornerSubPix к ключевым точкам
+            corrected_landmarks = landmarks.copy()
+            
+            # Выбираем только 2D координаты для коррекции
+            points_2d = landmarks[:, :2].astype(np.float32)
+            
+            # Проверяем, что точки находятся в пределах изображения
+            h, w = gray.shape
+            valid_mask = ((points_2d[:, 0] >= 0) & (points_2d[:, 0] < w) & 
+                         (points_2d[:, 1] >= 0) & (points_2d[:, 1] < h))
+            
+            if np.any(valid_mask):
+                valid_points = points_2d[valid_mask]
+                
+                # Применяем субпиксельную коррекцию
+                corners = cv2.cornerSubPix(
+                    gray, valid_points, SUBPIXEL_WIN_SIZE, 
+                    SUBPIXEL_ZERO_ZONE, SUBPIXEL_CRITERIA
+                )
+                
+                # Обновляем координаты только для валидных точек
+                corrected_landmarks[valid_mask, :2] = corners
+                
+                logger.debug(f"Применена субпиксельная коррекция к {np.sum(valid_mask)} точкам")
+                return corrected_landmarks
+            else:
+                logger.warning("Нет валидных точек для субпиксельной коррекции")
+                return landmarks
+            
+        except Exception as e:
+            logger.warning(f"Ошибка субпиксельной коррекции: {e}")
+            return landmarks
+
+    def _calculate_detailed_pose_from_param(self, param: np.ndarray, landmarks: np.ndarray) -> PoseEstimationResult:
+        """Детальный расчет позы из параметров 3DDFA"""
+        try:
+            # Извлечение матрицы поворота из параметров
+            # param содержит: [pitch, yaw, roll, tx, ty, tz, scale, ...]
+            pitch = float(param[0])
+            yaw = float(param[1])
+            roll = float(param[2])
+            
+            # Извлечение трансляции
+            tx = float(param[3])
+            ty = float(param[4])
+            tz = float(param[5])
+            
             # Конвертация в градусы
             pitch_deg = np.degrees(pitch)
             yaw_deg = np.degrees(yaw)
             roll_deg = np.degrees(roll)
-
+            
+            # Создание матрицы поворота
+            rotation_matrix = R.from_euler('xyz', [pitch, yaw, roll]).as_matrix()
+            
+            # Вектор трансляции
+            translation_vector = np.array([tx, ty, tz])
+            
+            # Расчет достоверности позы на основе стабильности ландмарков
+            pose_confidence = self._calculate_pose_confidence(landmarks, rotation_matrix)
+            
+            # Расчет стабильности позы
+            stability_score = self._calculate_pose_stability_from_angles(pitch_deg, yaw_deg, roll_deg)
+            
             # Определение категории позы
-            abs_yaw = abs(yaw_deg)
-            if abs_yaw <= 15:
-                pose_category = "Frontal"
-            elif abs_yaw <= 35:
-                pose_category = "Frontal_Edge"
-            elif abs_yaw <= 65:
-                pose_category = "Semi_Profile"
-            else:
-                pose_category = "Profile"
+            pose_category = self._determine_pose_category(yaw_deg, pitch_deg, roll_deg)
             
-            # Расчет confidence на основе переданного массива доверия
-            confidence = np.mean(confidence_array) # Используем среднее от переданного массива доверия
-            
-            result = {
-                "pose_category": pose_category,
-                "angles": (float(pitch_deg), float(yaw_deg), float(roll_deg)), # Возвращаем в градусах
-                "confidence": float(confidence),
-                "details": f"Yaw: {yaw_deg:.1f}°, Pitch: {pitch_deg:.1f}°, Roll: {roll_deg:.1f}°"
-            }
-            
-            logger.info(f"Поза определена: {pose_category}, углы: {result['angles']}")
-            
-            return result
+            return PoseEstimationResult(
+                yaw=yaw_deg,
+                pitch=pitch_deg,
+                roll=roll_deg,
+                rotation_matrix=rotation_matrix,
+                translation_vector=translation_vector,
+                pose_confidence=pose_confidence,
+                pose_category=pose_category,
+                stability_score=stability_score
+            )
             
         except Exception as e:
-            logger.error(f"Ошибка определения позы: {e}")
-            return {
-                "pose_category": "Error",
-                "angles": (0.0, 0.0, 0.0),
-                "confidence": 0.0,
-                "details": f"Error: {str(e)}"
-            }
+            logger.error(f"Ошибка расчета позы: {e}")
+            return PoseEstimationResult(
+                yaw=0.0, pitch=0.0, roll=0.0,
+                rotation_matrix=np.eye(3),
+                translation_vector=np.zeros(3),
+                pose_confidence=0.0,
+                pose_category='frontal',
+                stability_score=0.0
+            )
 
-    def _calculate_landmark_quality(self, landmarks_3d: np.ndarray, face_scale_factor: float = 1.0) -> float:
-        """Расчет качества ландмарок с нормализацией по масштабу лица"""
+    def _calculate_pose_confidence(self, landmarks: np.ndarray, rotation_matrix: np.ndarray) -> float:
+        """Расчет достоверности позы"""
         try:
-            if landmarks_3d.size == 0:
-                return 0.0
+            # Проверка консистентности ландмарков с матрицей поворота
+            # Используем симметричные точки для проверки
+            left_eye_points = landmarks[42:48, :3]
+            right_eye_points = landmarks[36:42, :3]
             
-            # Проверка на выбросы
-            distances = pdist(landmarks_3d)
-            mean_dist = np.mean(distances)
-            std_dist = np.std(distances)
+            # Центры глаз
+            left_eye_center = np.mean(left_eye_points, axis=0)
+            right_eye_center = np.mean(right_eye_points, axis=0)
             
-            # ИСПРАВЛЕНО: Нормализация mean_dist и std_dist по масштабу лица
-            if face_scale_factor > 0:
-                mean_dist_norm = mean_dist / face_scale_factor
-                std_dist_norm = std_dist / face_scale_factor
-            else:
-                mean_dist_norm = mean_dist
-                std_dist_norm = std_dist
+            # Ожидаемое расстояние между глазами (нормализованное)
+            eye_distance = np.linalg.norm(left_eye_center - right_eye_center)
             
-            # Качество на основе нормализованного стандартного отклонения
-            # Используем порог, который может быть настроен
-            # Чем меньше std_dist_norm, тем выше качество
-            # Здесь я использую простую линейную зависимость, можно использовать сигмоиду для более плавного перехода
-            # Предположим, что допустимое std_dist_norm < 0.1 для хорошего качества, и выше 0.5 - плохое
-            max_acceptable_std = 0.2 # Примерный порог, может потребоваться калибровка
-            quality = max(0.0, 1.0 - (std_dist_norm / max_acceptable_std))
+            # Проверка соответствия поворота и расположения глаз
+            eye_line = right_eye_center - left_eye_center
+            eye_line_normalized = eye_line / np.linalg.norm(eye_line)
             
-            return quality
+            # Ожидаемое направление линии глаз после поворота
+            expected_direction = rotation_matrix @ np.array([1, 0, 0])
+            
+            # Косинусное сходство
+            similarity = np.dot(eye_line_normalized, expected_direction[:len(eye_line_normalized)])
+            confidence = max(0.0, min(1.0, similarity))
+            
+            return float(confidence)
             
         except Exception as e:
-            logger.error(f"Ошибка расчета качества ландмарок: {e}")
+            logger.error(f"Ошибка расчета достоверности позы: {e}")
             return 0.5
 
-    def normalize_landmarks_by_pose_category(self, lmk3d: np.ndarray,
-                                             pose: str,
-                                             visibility: np.ndarray):
-        # Определяем центр и масштаб на основе всех 68 ландмарок
-        # visibility mask будет применен позже, если потребуется работа только с видимыми точками
-        center = {
-            "Frontal":       lmk3d[30, :3],
-            "Frontal-Edge":  lmk3d[30, :3],
-            "Semi-Profile":  0.5*(lmk3d[8, :3] + lmk3d[27, :3]),
-            "Profile":       lmk3d[11, :3],
-        }[pose]
-
-        if pose == "Frontal":
-            p1, p2 = lmk3d[36, :3], lmk3d[45, :3]
-            scale = np.linalg.norm(p1 - p2) / STANDARD_IOD
-            try:
-                roi_width = abs(lmk3d[45,0] - lmk3d[36,0])
-                roi_width = max(roi_width, 1e-5)
-                iod_norm = np.linalg.norm(lmk3d[36,:2] - lmk3d[45,:2]) / roi_width
-                if not (IOD_RATIO_MIN < iod_norm < IOD_RATIO_MAX):
-                    logger.warning(f"[normalize_landmarks_by_pose_category] IOD ratio: {iod_norm:.3f} — значение вне рекомендуемого диапазона ({IOD_RATIO_MIN} < IOD < {IOD_RATIO_MAX}), но анализ продолжается. Любой ракурс разрешён.")
-                # УДАЛЕНО: return или raise по IOD ratio
-            except ZeroDivisionError:
-                logger.error("[normalize_landmarks_by_pose_category] ZeroDivisionError: попытка деления на ноль при расчёте iod_norm. Возвращаю исходные ландмарки без нормализации.")
-                return lmk3d
-        elif pose == "Frontal-Edge":
-            # Выбираем видимый глаз для определения масштаба
-            eye = lmk3d[36] if lmk3d[36,2] > lmk3d[45,2] else lmk3d[45]
-            scale = np.linalg.norm(lmk3d[30,:3] - eye[:3]) / STANDARD_NOSE_EYE
-        elif pose == "Semi-Profile":
-            scale = np.linalg.norm(lmk3d[8,:3] - lmk3d[27,:3]) / STANDARD_FACE_HEIGHT
-        else:                                           # Profile
-            scale = np.linalg.norm(lmk3d[3,:3] - lmk3d[12,:3]) / STANDARD_PROFILE_HEIGHT
-
-        # Применяем нормализацию
-        norm = (lmk3d[:, :3] - center) / scale
-
-        # Применяем visibility_mask для исключения невидимых точек
-        norm_masked = norm * visibility[:, np.newaxis] # Умножаем на маску, чтобы обнулить невидимые
-
-        return norm_masked # Возвращаем нормализованные и, возможно, отфильтрованные ландмарки
-
-    def calculate_identity_signature_metrics(self, landmarks_3d: np.ndarray, pose_category: str) -> Dict[str, float]:
-        """
-        ИСПРАВЛЕНО: Расчет 15 метрик идентичности
-        Согласно правкам: все 15 метрик из 3 групп по 5 метрик
-        """
+    def _calculate_pose_stability_from_angles(self, pitch: float, yaw: float, roll: float) -> float:
+        """Расчет стабильности позы на основе углов"""
         try:
-            if landmarks_3d is None or not hasattr(landmarks_3d, 'size') or landmarks_3d.size == 0:
-                logger.warning("Ландмарки не найдены или пусты, пропуск.")
-                return {}
+            # Стабильность обратно пропорциональна отклонению от нейтральной позы
+            max_deviation = max(abs(pitch), abs(yaw), abs(roll))
             
-            logger.info(f"Расчет 15 метрик идентичности для позы: {pose_category}")
+            # Нормализация относительно максимального допустимого угла
+            max_allowed_angle = 45.0
+            stability = 1.0 - min(max_deviation / max_allowed_angle, 1.0)
             
-            metrics = {}
-            
-            # ГРУППА 1: Skull Geometry Signature (5 метрик)
-            metrics.update(self._calculate_skull_geometry_metrics(landmarks_3d))
-            
-            # ГРУППА 2: Facial Proportions Signature (5 метрик)  
-            metrics.update(self._calculate_facial_proportions_metrics(landmarks_3d))
-            
-            # ГРУППА 3: Bone Structure Signature (5 метрик)
-            metrics.update(self._calculate_bone_structure_metrics(landmarks_3d))
-            
-            # Проверка количества метрик
-            if len(metrics) != 15:
-                logger.error(f"Неверное количество метрик: {len(metrics)}, ожидается 15")
-                return self._get_default_metrics()
-            
-            logger.info(f"Рассчитано {len(metrics)} метрик идентичности")
-            return metrics
+            return float(max(0.0, stability))
             
         except Exception as e:
-            logger.error(f"Ошибка расчета метрик идентичности: {e}")
-            return self._get_default_metrics()
+            logger.error(f"Ошибка расчета стабильности позы: {e}")
+            return 0.0
 
-    def _calculate_skull_geometry_metrics(self, landmarks_3d: np.ndarray) -> Dict[str, float]:
-        """Расчет метрик геометрии черепа (6 метрик)"""
+    def _determine_pose_category(self, yaw: float, pitch: float, roll: float) -> str:
+        """Определение категории позы по углам"""
         try:
-            metrics = {}
+            # Получение конфигураций ракурсов из конфига
+            view_configs = self.config.get_view_configs()
             
-            # 1. skull_width_ratio - отношение ширины черепа к высоте лица
-            skull_width = calculate_distance(landmarks_3d[0], landmarks_3d[16])
-            face_height_for_ratio = calculate_distance(landmarks_3d[8], landmarks_3d[27])
-            metrics["skull_width_ratio"] = skull_width / (face_height_for_ratio + 1e-6)
+            for view_name, view_config in view_configs.items():
+                yaw_range = view_config['yaw']
+                pitch_range = view_config['pitch']
+                roll_range = view_config['roll']
+                
+                if (yaw_range[0] <= yaw <= yaw_range[1] and
+                    pitch_range[0] <= pitch <= pitch_range[1] and
+                    roll_range[0] <= roll <= roll_range[1]):
+                    return view_name
             
-            # 2. skull_depth_ratio - отношение глубины лица к высоте лица
-            # Аппроксимация глубины: разница Z между кончиком носа и средней точкой глаз.
-            nose_tip_z = landmarks_3d[30, 2]
-            eye_avg_z = np.mean(landmarks_3d[[36, 45], 2])
-            face_depth = abs(nose_tip_z - eye_avg_z)
-            metrics["skull_depth_ratio"] = face_depth / (face_height_for_ratio + 1e-6)
-            
-            # 3. forehead_height_ratio - отношение высоты лба к высоте лица
-            forehead_top = landmarks_3d[19] # Точка на лбу (между бровями)
-            nasion = landmarks_3d[27] # Переносица
-            forehead_height = calculate_distance(forehead_top, nasion)
-            metrics["forehead_height_ratio"] = forehead_height / (face_height_for_ratio + 1e-6)
-            
-            # 4. temple_width_ratio - отношение ширины висков к ширине черепа
-            temple_width = calculate_distance(landmarks_3d[17], landmarks_3d[26]) # Внешние точки бровей как прокси
-            metrics["temple_width_ratio"] = temple_width / (skull_width + 1e-6)
-            
-            # 5. zygomatic_arch_width - ширина скуловой дуги
-            # Используем точки 1 и 15 как прокси для ширины скуловой дуги (bizygomatic width)
-            metrics["zygomatic_arch_width"] = calculate_distance(landmarks_3d[1], landmarks_3d[15])
-            
-            # 6. occipital_curve - кривизна затылочной области (аппроксимация)
-            # Используем точки на нижней челюсти и подбородке для аппроксимации кривизны нижней части лица
-            # Эти точки (0, 8, 16) лучше отражают общий контур лица.
-            posterior_points = landmarks_3d[[0, 8, 16]]
-            metrics["occipital_curve"] = fit_curve_to_points(posterior_points) # Чем меньше, тем более плоская
-            
-            return metrics
+            return 'frontal'  # По умолчанию
             
         except Exception as e:
-            logger.error(f"Ошибка расчета метрик геометрии черепа: {e}")
-            return {
-                "skull_width_ratio": 0.0,
-                "skull_depth_ratio": 0.0,
-                "forehead_height_ratio": 0.0,
-                "temple_width_ratio": 0.0,
-                "zygomatic_arch_width": 0.0,
-                "occipital_curve": 0.0
-            }
+            logger.error(f"Ошибка определения категории позы: {e}")
+            return 'frontal'
 
-    def _calculate_facial_proportions_metrics(self, landmarks_3d: np.ndarray) -> Dict[str, float]:
-        """Расчет метрик пропорций лица (6 метрик)"""
+    def _calculate_landmarks_confidence(self, landmarks: np.ndarray, 
+                                      image: np.ndarray, 
+                                      bbox: Tuple[int, int, int, int]) -> float:
+        """Расчет достоверности извлеченных ландмарков"""
         try:
-            metrics = {}
-            face_width = calculate_distance(landmarks_3d[0], landmarks_3d[16]) # Ширина лица по боковым точкам
+            confidence_factors = []
             
-            # 1. eye_distance_ratio - отношение межзрачкового расстояния к ширине лица
-            interocular_distance = calculate_distance(landmarks_3d[36], landmarks_3d[45])
-            metrics["eye_distance_ratio"] = interocular_distance / (face_width + 1e-6)
+            # 1. Проверка, что все точки в пределах изображения
+            h, w = image.shape[:2]
+            valid_points = np.all((landmarks[:, 0] >= 0) & (landmarks[:, 0] < w) & 
+                                (landmarks[:, 1] >= 0) & (landmarks[:, 1] < h))
+            confidence_factors.append(1.0 if valid_points else 0.3)
             
-            # 2. nose_width_ratio - отношение ширины носа к длине носа
-            nose_width = calculate_distance(landmarks_3d[31], landmarks_3d[35]) # Ширина ноздрей
-            nose_length = calculate_distance(landmarks_3d[27], landmarks_3d[30]) # Переносица - кончик носа
-            metrics["nose_width_ratio"] = nose_width / (nose_length + 1e-6)
+            # 2. Проверка симметрии лица
+            left_eye_center = np.mean(landmarks[42:48, :2], axis=0)
+            right_eye_center = np.mean(landmarks[36:42, :2], axis=0)
+            eye_distance = np.linalg.norm(left_eye_center - right_eye_center)
             
-            # 3. mouth_width_ratio - отношение ширины рта к ширине лица
-            mouth_width = calculate_distance(landmarks_3d[48], landmarks_3d[54])
-            metrics["mouth_width_ratio"] = mouth_width / (face_width + 1e-6)
+            # Проверка разумности расстояния между глазами
+            bbox_width = bbox[2]
+            normalized_eye_distance = eye_distance / bbox_width
             
-            # 4. chin_width_ratio - отношение ширины подбородка к ширине челюсти
-            chin_width = calculate_distance(landmarks_3d[6], landmarks_3d[10]) # Нижняя часть подбородка
-            jaw_width = calculate_distance(landmarks_3d[4], landmarks_3d[12]) # Ширина нижней челюсти
-            metrics["chin_width_ratio"] = chin_width / (jaw_width + 1e-6)
-
-            # 5. jaw_angle_ratio - отношение углов челюсти (левая и правая сторона)
-            # Используем угол, образованный боковыми точками челюсти и подбородком
-            left_jaw_angle = calculate_angle(landmarks_3d[4], landmarks_3d[8], landmarks_3d[6])
-            right_jaw_angle = calculate_angle(landmarks_3d[12], landmarks_3d[8], landmarks_3d[10])
-            metrics["jaw_angle_ratio"] = abs(left_jaw_angle - right_jaw_angle) # Отражает асимметрию
+            # Ожидаемое расстояние между глазами (примерно 0.3 от ширины лица)
+            expected_ratio = 0.3
+            eye_ratio_confidence = 1.0 - abs(normalized_eye_distance - expected_ratio) / expected_ratio
+            confidence_factors.append(max(0.0, min(1.0, eye_ratio_confidence)))
             
-            # 6. forehead_angle - угол наклона лба
-            # Используем точки на лбу и переносице для расчета угла
-            metrics["forehead_angle"] = calculate_angle(landmarks_3d[19], landmarks_3d[27], landmarks_3d[24])
+            # 3. Проверка анатомической корректности
+            nose_tip = landmarks[30, :2]
+            mouth_center = np.mean(landmarks[48:68, :2], axis=0)
             
-            return metrics
+            # Расстояние нос-рот должно быть разумным
+            nose_mouth_distance = np.linalg.norm(nose_tip - mouth_center)
+            normalized_nm_distance = nose_mouth_distance / bbox_width
+            
+            # Ожидаемое расстояние нос-рот
+            expected_nm_ratio = 0.15
+            nm_confidence = 1.0 - abs(normalized_nm_distance - expected_nm_ratio) / expected_nm_ratio
+            confidence_factors.append(max(0.0, min(1.0, nm_confidence)))
+            
+            # 4. Проверка консистентности Z-координат
+            if landmarks.shape[1] >= 3:
+                z_coords = landmarks[:, 2]
+                z_std = np.std(z_coords)
+                z_range = np.max(z_coords) - np.min(z_coords)
+                
+                # Z-координаты должны быть в разумных пределах
+                if z_range > 0:
+                    z_confidence = 1.0 - min(z_std / z_range, 1.0)
+                    confidence_factors.append(max(0.0, z_confidence))
+            
+            # 5. Проверка качества ключевых точек глаз
+            eye_quality = self._assess_eye_landmarks_quality(landmarks)
+            confidence_factors.append(eye_quality)
+            
+            # Общая достоверность
+            overall_confidence = np.mean(confidence_factors)
+            
+            return float(np.clip(overall_confidence, 0.0, 1.0))
             
         except Exception as e:
-            logger.error(f"Ошибка расчета пропорций лица: {e}")
-            return {
-                "eye_distance_ratio": 0.0,
-                "nose_width_ratio": 0.0,
-                "mouth_width_ratio": 0.0,
-                "chin_width_ratio": 0.0,
-                "jaw_angle_ratio": 0.0,
-                "forehead_angle": 0.0
-            }
+            logger.error(f"Ошибка расчета достоверности: {e}")
+            return 0.5
 
-    def _calculate_bone_structure_metrics(self, landmarks_3d: np.ndarray) -> Dict[str, float]:
-        """Расчет метрик костной структуры (3 метрики)"""
+    def _assess_eye_landmarks_quality(self, landmarks: np.ndarray) -> float:
+        """Оценка качества ландмарков глаз"""
         try:
-            metrics = {}
+            # Проверка формы глаз
+            left_eye = landmarks[42:48, :2]
+            right_eye = landmarks[36:42, :2]
             
-            # 1. nose_projection_ratio - отношение выступа носа
-            # Разница в Z-координате между кончиком носа и основанием носа
-            nose_projection = abs(landmarks_3d[30, 2] - landmarks_3d[33, 2])
-            nose_length = calculate_distance(landmarks_3d[27], landmarks_3d[30])
-            metrics["nose_projection_ratio"] = nose_projection / (nose_length + 1e-6)
+            # Расчет площади глаз (приблизительно)
+            left_eye_area = self._calculate_polygon_area(left_eye)
+            right_eye_area = self._calculate_polygon_area(right_eye)
             
-            # 2. chin_projection_ratio - отношение выступа подбородка
-            # Разница в Z-координате между подбородком и кончиком носа
-            chin_projection = abs(landmarks_3d[8, 2] - landmarks_3d[30, 2])
-            metrics["chin_projection_ratio"] = chin_projection / (nose_projection + 1e-6) if nose_projection > 0 else 0.0
+            # Проверка симметрии площадей глаз
+            if left_eye_area > 0 and right_eye_area > 0:
+                area_ratio = min(left_eye_area, right_eye_area) / max(left_eye_area, right_eye_area)
+                return float(area_ratio)
+            else:
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"Ошибка оценки качества глаз: {e}")
+            return 0.5
+
+    def _calculate_polygon_area(self, points: np.ndarray) -> float:
+        """Расчет площади полигона по координатам точек"""
+        try:
+            if len(points) < 3:
+                return 0.0
             
-            # 3. jaw_line_angle - общий угол линии челюсти
-            # Угол, образованный точками 4, 8, 12 (нижняя челюсть, подбородок, нижняя челюсть)
-            metrics["jaw_line_angle"] = calculate_angle(landmarks_3d[4], landmarks_3d[8], landmarks_3d[12])
+            # Формула площади полигона (Shoelace formula)
+            x = points[:, 0]
+            y = points[:, 1]
             
-            return metrics
+            area = 0.5 * abs(sum(x[i] * y[i+1] - x[i+1] * y[i] 
+                                for i in range(-1, len(x)-1)))
+            return area
             
         except Exception as e:
-            logger.error(f"Ошибка расчета костной структуры: {e}")
-            return {
-                "nose_projection_ratio": 0.0,
-                "chin_projection_ratio": 0.0,
-                "jaw_line_angle": 0.0
-            }
+            logger.error(f"Ошибка расчета площади полигона: {e}")
+            return 0.0
 
-    def _get_default_metrics(self) -> Dict[str, float]:
-        """Получение метрик по умолчанию, согласно обновленному плану"""
-        return {
-            # Skull Geometry (6 metrics)
-            "skull_width_ratio": 0.0,
-            "skull_depth_ratio": 0.0,
-            "forehead_height_ratio": 0.0,
-            "temple_width_ratio": 0.0,
-            "zygomatic_arch_width": 0.0,
-            "occipital_curve": 0.0,
-            # Facial Proportions (6 metrics)
-            "eye_distance_ratio": 0.0,
-            "nose_width_ratio": 0.0,
-            "mouth_width_ratio": 0.0,
-            "chin_width_ratio": 0.0,
-            "jaw_angle_ratio": 0.0,
-            "forehead_angle": 0.0,
-            # Bone Structure (3 metrics)
-            "nose_projection_ratio": 0.0,
-            "chin_projection_ratio": 0.0,
-            "jaw_line_angle": 0.0
-        }
+    def _calculate_shape_errors(self, landmarks: np.ndarray) -> Tuple[float, float]:
+        """Расчет ошибок формы лица"""
+        try:
+            # Общая ошибка формы (среднеквадратичное отклонение от среднего)
+            center = np.mean(landmarks[:, :2], axis=0)
+            distances = np.linalg.norm(landmarks[:, :2] - center, axis=1)
+            shape_error = float(np.std(distances))
+            
+            # Ошибка области глаз
+            left_eye = landmarks[42:48, :2]
+            right_eye = landmarks[36:42, :2]
+            
+            left_eye_center = np.mean(left_eye, axis=0)
+            right_eye_center = np.mean(right_eye, axis=0)
+            
+            left_eye_distances = np.linalg.norm(left_eye - left_eye_center, axis=1)
+            right_eye_distances = np.linalg.norm(right_eye - right_eye_center, axis=1)
+            
+            eye_region_error = float(np.mean([np.std(left_eye_distances), np.std(right_eye_distances)]))
+            
+            return shape_error, eye_region_error
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета ошибок формы: {e}")
+            return 0.0, 0.0
 
-    def calculate_comprehensive_shape_error(self, landmarks_3d: np.ndarray) -> Dict[str, float]:
+    def _extract_dense_surface(self, param: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Извлечение плотной поверхности лица (38365 точек)"""
+        try:
+            if self.bfm_model is None:
+                return None, None
+            
+            # Извлечение коэффициентов формы и выражения
+            shape_coeff = param[12:52]  # 40 коэффициентов формы
+            exp_coeff = param[52:62] if len(param) > 62 else np.zeros(10)  # 10 коэффициентов выражения
+            
+            # Реконструкция 3D-вершин
+            shape_base = self.bfm_model['shapeMU'] + self.bfm_model['shapePC'] @ shape_coeff
+            
+            # Добавление выражения (если доступно)
+            if 'expPC' in self.bfm_model and self.bfm_model['expPC'] is not None:
+                exp_base = self.bfm_model['expPC'] @ exp_coeff
+                vertices = (shape_base + exp_base).reshape(-1, 3)
+            else:
+                vertices = shape_base.reshape(-1, 3)
+            
+            # Ограничение количества точек
+            if len(vertices) > DENSE_SURFACE_PARAMS['dense_points_limit']:
+                vertices = vertices[:DENSE_SURFACE_PARAMS['dense_points_limit']]
+            
+            # Применение сглаживания если включено
+            if DENSE_SURFACE_PARAMS['surface_smoothing']:
+                vertices = self._apply_surface_smoothing(vertices)
+            
+            return vertices, self.triangles
+            
+        except Exception as e:
+            logger.warning(f"Ошибка извлечения плотной поверхности: {e}")
+            return None, None
+
+    def _apply_surface_smoothing(self, vertices: np.ndarray) -> np.ndarray:
+        """Применение сглаживания к поверхности"""
+        try:
+            # Простое сглаживание через усреднение соседних точек
+            if self.triangles is not None and len(vertices) > 100:
+                smoothed_vertices = vertices.copy()
+                
+                # Для каждой вершины усредняем с соседними
+                for i in range(len(vertices)):
+                    # Находим треугольники, содержащие данную вершину
+                    connected_triangles = self.triangles[np.any(self.triangles == i, axis=1)]
+                    
+                    if len(connected_triangles) > 0:
+                        # Получаем все соседние вершины
+                        neighbors = np.unique(connected_triangles.flatten())
+                        neighbors = neighbors[neighbors != i]  # Исключаем саму вершину
+                        
+                        if len(neighbors) > 0:
+                            # Усредняем позицию с соседними вершинами
+                            neighbor_positions = vertices[neighbors]
+                            smoothed_position = np.mean(neighbor_positions, axis=0)
+                            
+                            # Применяем сглаживание с весом 0.3
+                            smoothed_vertices[i] = 0.7 * vertices[i] + 0.3 * smoothed_position
+                
+                return smoothed_vertices
+            else:
+                return vertices
+                
+        except Exception as e:
+            logger.warning(f"Ошибка сглаживания поверхности: {e}")
+            return vertices
+
+    def _analyze_landmarks_visibility(self, landmarks: np.ndarray, 
+                                    image: np.ndarray, 
+                                    bbox: Tuple[int, int, int, int]) -> np.ndarray:
+        """Анализ видимости каждой ландмарки"""
+        try:
+            visibility = np.ones(len(landmarks), dtype=float)
+            h, w = image.shape[:2]
+            
+            for i, point in enumerate(landmarks):
+                x, y = point[:2]
+                
+                # Проверка, что точка в пределах изображения
+                if x < 0 or x >= w or y < 0 or y >= h:
+                    visibility[i] = 0.0
+                    continue
+                
+                # Проверка локального контраста вокруг точки
+                try:
+                    x_int, y_int = int(x), int(y)
+                    window_size = 5
+                    
+                    y1 = max(0, y_int - window_size)
+                    y2 = min(h, y_int + window_size + 1)
+                    x1 = max(0, x_int - window_size)
+                    x2 = min(w, x_int + window_size + 1)
+                    
+                    if len(image.shape) == 3:
+                        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                    else:
+                        gray = image
+                    
+                    window = gray[y1:y2, x1:x2]
+                    
+                    if window.size > 0:
+                        contrast = np.std(window.astype(float))
+                        # Нормализация контраста к диапазону [0, 1]
+                        visibility[i] = min(1.0, contrast / 30.0)
+                    
+                except Exception:
+                    visibility[i] = 0.5  # Нейтральная видимость при ошибке
+            
+            return visibility
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа видимости ландмарков: {e}")
+            return np.ones(len(landmarks), dtype=float) * 0.5
+
+    def _calculate_landmarks_quality_scores(self, landmarks: np.ndarray, image: np.ndarray) -> np.ndarray:
+        """Расчет балла качества для каждой ландмарки"""
+        try:
+            quality_scores = np.zeros(len(landmarks))
+            
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image
+            
+            h, w = gray.shape
+            
+            for i, point in enumerate(landmarks):
+                x, y = point[:2]
+                
+                if 0 <= x < w and 0 <= y < h:
+                    # Анализ локальных градиентов
+                    x_int, y_int = int(x), int(y)
+                    
+                    # Размер окна для анализа
+                    window_size = 3
+                    y1 = max(0, y_int - window_size)
+                    y2 = min(h, y_int + window_size + 1)
+                    x1 = max(0, x_int - window_size)
+                    x2 = min(w, x_int + window_size + 1)
+                    
+                    window = gray[y1:y2, x1:x2].astype(float)
+                    
+                    if window.size > 0:
+                        # Расчет градиентов
+                        grad_x = cv2.Sobel(window, cv2.CV_64F, 1, 0, ksize=3)
+                        grad_y = cv2.Sobel(window, cv2.CV_64F, 0, 1, ksize=3)
+                        
+                        # Магнитуда градиента
+                        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+                        
+                        # Качество как средняя магнитуда градиента
+                        quality = np.mean(gradient_magnitude) / 255.0
+                        quality_scores[i] = min(1.0, quality)
+                    else:
+                        quality_scores[i] = 0.0
+                else:
+                    quality_scores[i] = 0.0
+            
+            return quality_scores
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета качества ландмарков: {e}")
+            return np.ones(len(landmarks)) * 0.5
+
+    def _calculate_pose_stability(self, pose_result: PoseEstimationResult) -> float:
+        """Расчет стабильности позы"""
+        try:
+            # Стабильность на основе достоверности и углов
+            angle_stability = pose_result.stability_score
+            confidence_stability = pose_result.pose_confidence
+            
+            # Проверка экстремальных углов
+            max_angle = max(abs(pose_result.yaw), abs(pose_result.pitch), abs(pose_result.roll))
+            angle_penalty = max(0.0, (max_angle - 30.0) / 60.0)  # Штраф за углы > 30°
+            
+            stability = (angle_stability + confidence_stability) / 2.0 - angle_penalty
+            
+            return float(max(0.0, min(1.0, stability)))
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета стабильности позы: {e}")
+            return 0.0
+
+    def _validate_landmarks_package(self, package: LandmarksPackage):
+        """Валидация пакета ландмарков"""
+        warnings = []
+        quality_flags = []
+        
+        try:
+            # Проверка достоверности
+            if package.landmarks_confidence < CONFIDENCE_THRESHOLD:
+                warnings.append(f"Низкая достоверность: {package.landmarks_confidence:.3f}")
+                quality_flags.append("low_confidence")
+            
+            # Проверка углов позы
+            for angle_name, angle_value in package.pose_angles.items():
+                min_val, max_val = POSE_ANGLE_LIMITS[angle_name]
+                if not (min_val <= angle_value <= max_val):
+                    warnings.append(f"Экстремальный угол {angle_name}: {angle_value:.1f}°")
+                    quality_flags.append(f"extreme_{angle_name}")
+            
+            # Проверка ошибок формы
+            if package.shape_error > 50.0:  # Пиксели
+                warnings.append(f"Высокая ошибка формы: {package.shape_error:.1f}")
+                quality_flags.append("high_shape_error")
+            
+            if package.eye_region_error > 20.0:  # Пиксели
+                warnings.append(f"Высокая ошибка области глаз: {package.eye_region_error:.1f}")
+                quality_flags.append("high_eye_error")
+            
+            # Проверка видимости ландмарков
+            if package.landmarks_visibility is not None:
+                low_visibility_count = np.sum(package.landmarks_visibility < 0.5)
+                if low_visibility_count > 10:  # Более 10 невидимых точек
+                    warnings.append(f"Низкая видимость {low_visibility_count} ландмарков")
+                    quality_flags.append("poor_visibility")
+            
+            # Проверка качества отдельных точек
+            if package.landmarks_quality_scores is not None:
+                low_quality_count = np.sum(package.landmarks_quality_scores < 0.3)
+                if low_quality_count > 15:  # Более 15 точек низкого качества
+                    warnings.append(f"Низкое качество {low_quality_count} ландмарков")
+                    quality_flags.append("poor_landmark_quality")
+            
+            # Проверка симметрии лица
+            if package.facial_symmetry_score < 0.6:
+                warnings.append(f"Низкая симметрия лица: {package.facial_symmetry_score:.3f}")
+                quality_flags.append("asymmetric_face")
+            
+            # Проверка стабильности позы
+            if package.pose_stability_score < 0.5:
+                warnings.append(f"Нестабильная поза: {package.pose_stability_score:.3f}")
+                quality_flags.append("unstable_pose")
+            
+            # Проверка плотной поверхности
+            if (package.dense_vertices is not None and 
+                len(package.dense_vertices) < DENSE_SURFACE_PARAMS['dense_points_limit'] * 0.8):
+                warnings.append("Неполная плотная поверхность")
+                quality_flags.append("incomplete_dense_mesh")
+            
+            package.warnings = warnings
+            package.quality_flags = quality_flags
+            
+            logger.debug(f"Валидация завершена: {len(warnings)} предупреждений, {len(quality_flags)} флагов")
+            
+        except Exception as e:
+            logger.error(f"Ошибка валидации пакета ландмарков: {e}")
+            package.warnings = [f"Ошибка валидации: {str(e)}"]
+            package.quality_flags = ["validation_error"]
+
+    def normalize_landmarks_by_pose_category(self, package: LandmarksPackage) -> LandmarksPackage:
         """
-        Расчет комплексной ошибки формы и региональных ошибок с использованием расстояния Хаусдорфа.
+        Нормализация ландмарков по категории позы
+        
+        Args:
+            package: Пакет с ландмарками
+            
+        Returns:
+            Обновленный пакет с нормализованными ландмарками
         """
         try:
-            if landmarks_3d.size == 0 or landmarks_3d.shape[0] < 68:
-                logger.warning("Недостаточно ландмарок для расчета ошибки формы.")
-                return {
-                    "overall_shape_error": 1.0,
-                    "eye_region_error": 1.0,
-                    "nose_region_error": 1.0,
-                    "mouth_region_error": 1.0,
-                    "hausdorff_distance": 1.0
-                }
+            # Получение конфигурации для данной позы
+            view_configs = self.config.get_view_configs()
+            pose_config = view_configs.get(package.pose_category, view_configs['frontal'])
             
-            if self.reference_model_landmarks is None or self.reference_model_landmarks.size == 0:
-                logger.warning("Референсная модель для расчета shape error не загружена. Возвращены дефолтные значения.")
-                return {
-                    "overall_shape_error": 1.0,
-                    "eye_region_error": 1.0,
-                    "nose_region_error": 1.0,
-                    "mouth_region_error": 1.0,
-                    "hausdorff_distance": 1.0
-                }
+            # Получение опорных точек
+            reference_points = pose_config['reference_points']
+            scale_type = pose_config['scale_type']
             
-            logger.info("Расчет комплексной ошибки формы")
+            # Расчет масштабного коэффициента
+            scale_factor, reference_distance = self._calculate_scale_factor(
+                package.landmarks_68, reference_points, scale_type
+            )
             
+            # Нормализация ландмарков
+            normalized_landmarks = package.landmarks_68.copy()
+            
+            # Центрирование по носу (точка 30)
+            nose_center = package.landmarks_68[30, :2]
+            normalized_landmarks[:, :2] -= nose_center
+            
+            # Масштабирование
+            if scale_factor > 0:
+                normalized_landmarks[:, :2] /= scale_factor
+            else:
+                logger.warning("Нулевой масштабный коэффициент, нормализация пропущена")
+            
+            # Обновление пакета
+            package.normalized_landmarks = normalized_landmarks
+            package.scale_factor = scale_factor
+            package.reference_distance = reference_distance
+            
+            logger.debug(f"Ландмарки нормализованы для позы {package.pose_category}, масштаб: {scale_factor:.3f}")
+            return package
+            
+        except Exception as e:
+            logger.error(f"Ошибка нормализации ландмарков: {e}")
+            package.warnings.append(f"Ошибка нормализации: {str(e)}")
+            return package
+
+    def _calculate_scale_factor(self, landmarks: np.ndarray, 
+                              reference_points: List[int], 
+                              scale_type: str) -> Tuple[float, float]:
+        """Расчет масштабного коэффициента"""
+        try:
+            reference_distances = self.config.get_reference_distances()
+            
+            if scale_type == 'IOD':
+                # Межзрачковое расстояние
+                left_eye_center = np.mean(landmarks[42:48, :2], axis=0)
+                right_eye_center = np.mean(landmarks[36:42, :2], axis=0)
+                measured_distance = np.linalg.norm(left_eye_center - right_eye_center)
+                expected_distance = reference_distances['IOD']
+                
+            elif scale_type == 'nose_eye':
+                # Расстояние нос-глаз
+                nose_tip = landmarks[30, :2]
+                eye_center = np.mean(landmarks[36:48, :2], axis=0)
+                measured_distance = np.linalg.norm(nose_tip - eye_center)
+                expected_distance = reference_distances['nose_eye']
+                
+            elif scale_type == 'face_height':
+                # Высота лица
+                top_point = landmarks[27, :2]  # Переносица
+                bottom_point = landmarks[8, :2]  # Подбородок
+                measured_distance = np.linalg.norm(top_point - bottom_point)
+                expected_distance = reference_distances['face_height']
+                
+            elif scale_type == 'profile_height':
+                # Высота профиля
+                top_point = landmarks[27, :2]
+                bottom_point = landmarks[8, :2]
+                measured_distance = np.linalg.norm(top_point - bottom_point)
+                expected_distance = reference_distances['profile_height']
+                
+            else:
+                # По умолчанию используем IOD
+                left_eye_center = np.mean(landmarks[42:48, :2], axis=0)
+                right_eye_center = np.mean(landmarks[36:42, :2], axis=0)
+                measured_distance = np.linalg.norm(left_eye_center - right_eye_center)
+                expected_distance = reference_distances['IOD']
+            
+            scale_factor = measured_distance / expected_distance if expected_distance > 0 else 1.0
+            
+            return float(scale_factor), float(measured_distance)
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета масштабного коэффициента: {e}")
+            return 1.0, 0.0
+
+    def determine_precise_face_pose(self, package: LandmarksPackage) -> Dict[str, float]:
+        """
+        Точное определение позы лица с дополнительными метриками
+        
+        Args:
+            package: Пакет с ландмарками
+            
+        Returns:
+            Расширенный словарь с углами позы
+        """
+        try:
+            pose_metrics = package.pose_angles.copy()
+            
+            # Дополнительные метрики позы
+            landmarks = package.landmarks_68
+            
+            # Наклон головы (по линии глаз)
+            left_eye_center = np.mean(landmarks[42:48, :2], axis=0)
+            right_eye_center = np.mean(landmarks[36:42, :2], axis=0)
+            eye_line_angle = np.degrees(np.arctan2(
+                left_eye_center[1] - right_eye_center[1],
+                left_eye_center[0] - right_eye_center[0]
+            ))
+            pose_metrics['head_tilt'] = float(eye_line_angle)
+            
+            # Асимметрия лица
+            nose_tip = landmarks[30, :2]
+            left_face_points = landmarks[0:9, :2]  # Левая сторона лица
+            right_face_points = landmarks[8:17, :2]  # Правая сторона лица
+            
+            left_distances = np.linalg.norm(left_face_points - nose_tip, axis=1)
+            right_distances = np.linalg.norm(right_face_points - nose_tip, axis=1)
+            
+            asymmetry = float(np.mean(np.abs(left_distances - right_distances[::-1])))
+            pose_metrics['face_asymmetry'] = asymmetry
+            
+            # Степень поворота (комбинированная метрика)
+            rotation_magnitude = np.sqrt(
+                pose_metrics['yaw']**2 + 
+                pose_metrics['pitch']**2 + 
+                pose_metrics['roll']**2
+            )
+            pose_metrics['rotation_magnitude'] = float(rotation_magnitude)
+            
+            # Оценка фронтальности
+            frontality_score = 1.0 - min(rotation_magnitude / 45.0, 1.0)
+            pose_metrics['frontality_score'] = float(frontality_score)
+            
+            # Оценка профильности
+            profile_score = abs(pose_metrics['yaw']) / 90.0
+            pose_metrics['profile_score'] = float(min(profile_score, 1.0))
+            
+            return pose_metrics
+            
+        except Exception as e:
+            logger.error(f"Ошибка определения точной позы: {e}")
+            return package.pose_angles
+
+    def calculate_comprehensive_shape_error(self, package: LandmarksPackage) -> Dict[str, float]:
+        """
+        Комплексный расчет ошибок формы лица
+        
+        Args:
+            package: Пакет с ландмарками
+            
+        Returns:
+            Словарь с различными метриками ошибок
+        """
+        try:
+            landmarks = package.landmarks_68
             shape_errors = {}
             
-            # Расчет расстояния Хаусдорфа
-            hausdorff_dist = self._calculate_hausdorff_distance(landmarks_3d, self.reference_model_landmarks)
-            shape_errors["hausdorff_distance"] = float(hausdorff_dist)
+            # Общая ошибка формы
+            shape_errors['overall_shape_error'] = package.shape_error
+            shape_errors['eye_region_error'] = package.eye_region_error
             
-            # Расчет общей ошибки формы (среднее Евклидово расстояние между соответствующими точками)
-            overall_distances = [calculate_distance(landmarks_3d[i], self.reference_model_landmarks[i]) 
-                                 for i in range(min(landmarks_3d.shape[0], self.reference_model_landmarks.shape[0]))]
-            shape_errors["overall_shape_error"] = float(np.mean(overall_distances))
+            # Ошибки отдельных областей
+            regions = {
+                'jaw': landmarks[0:17],
+                'right_eyebrow': landmarks[17:22],
+                'left_eyebrow': landmarks[22:27],
+                'nose': landmarks[27:36],
+                'right_eye': landmarks[36:42],
+                'left_eye': landmarks[42:48],
+                'mouth': landmarks[48:68]
+            }
             
-            # Расчет ошибок по регионам
-            eye_region_indices = list(range(36, 48))
-            nose_region_indices = list(range(27, 36))
-            mouth_region_indices = list(range(48, 68))
+            for region_name, region_points in regions.items():
+                if len(region_points) > 1:
+                    center = np.mean(region_points[:, :2], axis=0)
+                    distances = np.linalg.norm(region_points[:, :2] - center, axis=1)
+                    region_error = float(np.std(distances))
+                    shape_errors[f'{region_name}_error'] = region_error
             
-            shape_errors["eye_region_error"] = float(self._calculate_region_error(landmarks_3d, eye_region_indices))
-            shape_errors["nose_region_error"] = float(self._calculate_region_error(landmarks_3d, nose_region_indices))
-            shape_errors["mouth_region_error"] = float(self._calculate_region_error(landmarks_3d, mouth_region_indices))
+            # Симметрия лица
+            left_points = landmarks[0:9, :2]  # Левая сторона
+            right_points = landmarks[8:17, :2]  # Правая сторона (в обратном порядке)
             
-            logger.info(f"Shape error рассчитан: overall={shape_errors['overall_shape_error']:.3f}, Hausdorff={shape_errors['hausdorff_distance']:.3f}")
+            nose_center = landmarks[30, :2]
+            left_distances = np.linalg.norm(left_points - nose_center, axis=1)
+            right_distances = np.linalg.norm(right_points[::-1] - nose_center, axis=1)
+            
+            symmetry_error = float(np.mean(np.abs(left_distances - right_distances)))
+            shape_errors['symmetry_error'] = symmetry_error
+            
+            # Пропорциональность
+            eye_distance = np.linalg.norm(
+                np.mean(landmarks[42:48, :2], axis=0) - np.mean(landmarks[36:42, :2], axis=0)
+            )
+            nose_mouth_distance = np.linalg.norm(
+                landmarks[30, :2] - np.mean(landmarks[48:68, :2], axis=0)
+            )
+            
+            proportion_ratio = nose_mouth_distance / eye_distance if eye_distance > 0 else 0
+            expected_ratio = 0.5  # Примерное ожидаемое соотношение
+            proportion_error = float(abs(proportion_ratio - expected_ratio))
+            shape_errors['proportion_error'] = proportion_error
+            
+            # Компактность лица
+            face_center = np.mean(landmarks[:, :2], axis=0)
+            distances_from_center = np.linalg.norm(landmarks[:, :2] - face_center, axis=1)
+            compactness = float(np.std(distances_from_center) / np.mean(distances_from_center))
+            shape_errors['compactness_error'] = compactness
+            
+            # Анализ контура лица
+            jaw_points = landmarks[0:17, :2]
+            jaw_smoothness = self._calculate_contour_smoothness(jaw_points)
+            shape_errors['jaw_smoothness_error'] = float(jaw_smoothness)
             
             return shape_errors
             
         except Exception as e:
-            logger.error(f"Ошибка расчета shape error: {e}")
-            return {
-                "overall_shape_error": 1.0,
-                "eye_region_error": 1.0,
-                "nose_region_error": 1.0,
-                "mouth_region_error": 1.0,
-                "hausdorff_distance": 1.0
-            }
+            logger.error(f"Ошибка расчета комплексных ошибок формы: {e}")
+            return {'overall_shape_error': package.shape_error, 'eye_region_error': package.eye_region_error}
 
-    def _calculate_hausdorff_distance(self, set1: np.ndarray, set2: np.ndarray) -> float:
-        """Расчет расстояния Хаусдорфа между двумя наборами точек с использованием scipy.spatial.distance.directed_hausdorff"""
+    def _calculate_contour_smoothness(self, contour_points: np.ndarray) -> float:
+        """Расчет гладкости контура"""
         try:
-            # ИСПРАВЛЕНО: Использование scipy.spatial.distance.directed_hausdorff
-            # d(A, B) = max_{a in A} min_{b in B} ||a-b||
-            # d(B, A) = max_{b in B} min_{a in A} ||b-a||
-            # Hausdorff(A, B) = max(d(A, B), d(B, A))
+            if len(contour_points) < 3:
+                return 0.0
             
-            dist_ab = directed_hausdorff(set1, set2)[0]
-            dist_ba = directed_hausdorff(set2, set1)[0]
+            # Расчет кривизны в каждой точке
+            curvatures = []
+            for i in range(1, len(contour_points) - 1):
+                p1 = contour_points[i-1]
+                p2 = contour_points[i]
+                p3 = contour_points[i+1]
+                
+                # Векторы
+                v1 = p2 - p1
+                v2 = p3 - p2
+                
+                # Угол между векторами
+                cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
+                cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                angle = np.arccos(cos_angle)
+                
+                curvatures.append(angle)
             
-            hausdorff = max(dist_ab, dist_ba)
-            
-            return float(hausdorff)
+            # Стандартное отклонение кривизны как мера негладкости
+            return np.std(curvatures) if curvatures else 0.0
             
         except Exception as e:
-            logger.error(f"Ошибка расчета Hausdorff distance: {e}")
-            return 1.0
+            logger.error(f"Ошибка расчета гладкости контура: {e}")
+            return 0.0
 
-    def _calculate_region_error(self, landmarks_3d: np.ndarray, region_indices: List[int]) -> float:
-        """Расчет ошибки для конкретного региона лица"""
+    def extract_dense_surface_points(self, package: LandmarksPackage) -> Optional[np.ndarray]:
+        """
+        Извлечение точек плотной поверхности лица
+        
+        Args:
+            package: Пакет с ландмарками
+            
+        Returns:
+            Массив точек плотной поверхности или None
+        """
         try:
-            if not region_indices or landmarks_3d.shape[0] <= max(region_indices):
-                return 1.0
+            if not self.model_config.enable_dense_mesh or self.bfm_model is None:
+                return None
             
-            region_landmarks = landmarks_3d[region_indices]
+            if package.dense_vertices is not None:
+                return package.dense_vertices
             
-            if self.reference_model_landmarks is not None and len(self.reference_model_landmarks) > max(region_indices):
-                reference_region = self.reference_model_landmarks[region_indices]
-                
-                # Среднее расстояние между соответствующими точками
-                distances = [calculate_distance(region_landmarks[i], reference_region[i]) 
-                           for i in range(len(region_landmarks))]
-                return np.mean(distances)
-            else:
-                # Альтернативный расчет - вариация внутри региона
-                if len(region_landmarks) > 1:
-                    distances = pdist(region_landmarks)
-                    return np.std(distances)
+            # Если плотная поверхность не была извлечена ранее, пытаемся извлечь сейчас
+            logger.warning("Плотная поверхность не была извлечена при основном анализе")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Ошибка извлечения плотной поверхности: {e}")
+            return None
+
+    def analyze_landmark_stability(self, packages: List[LandmarksPackage]) -> Dict[str, float]:
+        """
+        Анализ стабильности ландмарков во времени
+        
+        Args:
+            packages: Список пакетов ландмарков
+            
+        Returns:
+            Словарь с метриками стабильности
+        """
+        try:
+            if len(packages) < 2:
+                return {'stability_score': 1.0, 'temporal_variance': 0.0}
+            
+            # Сортировка по времени
+            sorted_packages = sorted(packages, key=lambda p: p.cache_timestamp or datetime.datetime.now())
+            
+            # Извлечение нормализованных ландмарков
+            landmarks_sequence = []
+            for pkg in sorted_packages:
+                if pkg.normalized_landmarks is not None:
+                    landmarks_sequence.append(pkg.normalized_landmarks[:, :2])
                 else:
-                    return 0.5
-                    
-        except Exception as e:
-            logger.error(f"Ошибка расчета региональной ошибки: {e}")
-            return 1.0
-
-    def analyze_facial_asymmetry(self, landmarks_3d: np.ndarray, confidence_array: np.ndarray) -> dict:
-        import numpy as np
-        # 1. Проверка входных данных
-        if not isinstance(landmarks_3d, np.ndarray) or landmarks_3d.shape != (68, 3):
-            return {"overall_asymmetry": 0.0, "confidence": 0.0, "error": "Некорректный формат ландмарок"}
-        if confidence_array is None or len(confidence_array) != 68:
-            return {"overall_asymmetry": 0.0, "confidence": 0.0, "error": "Некорректный confidence_array"}
-
-        # 2. Индексы симметричных точек (по документации 3DDFA_V2)
-        left_indices  = [0, 1, 2, 3, 4, 5, 6, 7, 17, 18, 19, 20, 21, 36, 37, 38, 39, 40, 41, 48, 49, 50, 51, 52, 53, 54]
-        right_indices = [16,15,14,13,12,11,10,9,26,25,24,23,22,45,44,43,42,47,46,54,53,52,51,50,49,48]
-        n = min(len(left_indices), len(right_indices))
-        left_indices, right_indices = left_indices[:n], right_indices[:n]
-
-        left_landmarks = landmarks_3d[left_indices]
-        right_landmarks = landmarks_3d[right_indices]
-        # Отразить правую часть по оси X (симметрия)
-        center_x = np.mean(landmarks_3d[:, 0])
-        right_landmarks_mirrored = right_landmarks.copy()
-        right_landmarks_mirrored[:, 0] = 2 * center_x - right_landmarks[:, 0]
-
-        # 3. Расчёт асимметрии
-        asymmetry_scores = np.linalg.norm(left_landmarks - right_landmarks_mirrored, axis=1)
-        overall_asymmetry = float(np.mean(asymmetry_scores))
-        confidence = float(np.mean(confidence_array))
-
-        return {
-            "overall_asymmetry": overall_asymmetry,
-            "confidence": confidence,
-            "asymmetry_scores": asymmetry_scores.tolist()
-        }
-
-    def perform_cross_validation_landmarks(self, all_landmarks: List[np.ndarray], all_confidence_arrays: List[np.ndarray]) -> Dict[str, Any]:
-        """
-        Кросс-валидация ландмарок для проверки стабильности и качества.
-        Расчет среднего и максимального отклонения, показателя стабильности и уверенности.
-        """
-        try:
-            if not all_landmarks or len(all_landmarks) < 2 or not all_confidence_arrays or len(all_confidence_arrays) < 2:
-                logger.warning("Недостаточно данных для кросс-валидации ландмарок.")
-                return {
-                    "mean_variation": 0.0,
-                    "max_variation": 0.0,
-                    "stability_score": 0.0,
-                    "stable": True,
-                    "landmarks_variations": [],
-                    "confidence": 0.0 # В случае недостатка данных
-                }
+                    landmarks_sequence.append(pkg.landmarks_68[:, :2])
             
-            logger.info(f"Кросс-валидация {len(all_landmarks)} наборов ландмарок")
+            if len(landmarks_sequence) < 2:
+                return {'stability_score': 1.0, 'temporal_variance': 0.0}
             
-            # Фильтрация валидных ландмарок (убеждаемся, что есть 68 точек)
-            valid_landmarks = [lm for lm in all_landmarks if lm.size > 0 and lm.shape[0] >= 68]
-            valid_confidence_arrays = [conf for conf in all_confidence_arrays if conf.size > 0 and conf.shape[0] >= 68]
+            # Расчет временной вариации
+            landmarks_array = np.array(landmarks_sequence)  # [time, points, coords]
+            temporal_variance = np.mean(np.var(landmarks_array, axis=0))
             
-            if len(valid_landmarks) < 2 or len(valid_confidence_arrays) < 2 or len(valid_landmarks) != len(valid_confidence_arrays):
-                logger.warning("Недостаточно валидных ландмарок или массивов достоверности для кросс-валидации.")
-                return {
-                    "mean_variation": 0.0,
-                    "max_variation": 0.0,
-                    "stability_score": 1.0,
-                    "stable": True,
-                    "landmarks_variations": [],
-                    "confidence": 0.0
-                }
+            # Расчет стабильности (обратная величина вариации)
+            stability_score = 1.0 / (1.0 + temporal_variance)
             
-            # Расчет вариаций между наборами ландмарок
-            reference_landmarks = valid_landmarks[0]
-            variations = []
+            # Анализ трендов
+            trends = self._analyze_landmark_trends(landmarks_array)
             
-            for landmarks in valid_landmarks[1:]:
-                if landmarks.shape == reference_landmarks.shape:
-                    # Расчет расстояний между соответствующими точками
-                    variation = np.linalg.norm(landmarks - reference_landmarks, axis=1)
-                    variations.extend(variation)
-            
-            if variations:
-                validation_results = {
-                    "mean_variation": float(np.mean(variations)),
-                    "max_variation": float(np.max(variations)),
-                    "landmarks_variations": [float(v) for v in variations] # Преобразование в float
-                }
-                
-                # Оценка стабильности
-                validation_results["stability_score"] = float(max(0.0, 1.0 - validation_results["mean_variation"] / 5.0))
-                validation_results["stable"] = bool(validation_results["mean_variation"] < 3.0)
-                
-                # Расчет средней уверенности
-                overall_confidence = float(np.mean([np.mean(c) for c in valid_confidence_arrays]))
-                validation_results["confidence"] = overall_confidence
-
-                logger.info(f"Кросс-валидация: mean_var={validation_results['mean_variation']:.3f}, confidence={overall_confidence:.3f}")
-                
-            else:
-                validation_results = {
-                    "mean_variation": 0.0,
-                    "max_variation": 0.0,
-                    "stability_score": 1.0,
-                    "stable": True,
-                    "landmarks_variations": [],
-                    "confidence": 0.0
-                }
-            
-            return validation_results
-            
-        except Exception as e:
-            logger.error(f"Ошибка кросс-валидации ландмарок: {e}")
             return {
-                "mean_variation": 0.0,
-                "max_variation": 0.0,
-                "stability_score": 0.0,
-                "stable": False,
-                "landmarks_variations": [],
-                "confidence": 0.0
+                'stability_score': float(stability_score),
+                'temporal_variance': float(temporal_variance),
+                'trend_magnitude': float(trends['magnitude']),
+                'trend_direction': trends['direction']
             }
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа стабильности ландмарков: {e}")
+            return {'stability_score': 0.5, 'temporal_variance': 0.0}
 
-    def analyze_facial_features_changes(self, current_metrics: Dict[str, float], previous_metrics: Dict[str, float]) -> Dict[str, Any]:
-        """
-        Анализирует изменения лицевых признаков (identity metrics) между текущим и предыдущим наборами.
-        Возвращает словарь с обнаруженными изменениями, их оценками и значительными изменениями.
-        """
-        logger.info("Начало анализа изменений лицевых признаков")
-        changes_detected = {}
-        change_scores = {}
-        significant_changes = {}
-
-        feature_change_threshold = CRITICAL_THRESHOLDS.get("FEATURE_CHANGE_THRESHOLD", 0.1) # Default to 0.1 if not found
-
-        for metric_name, current_value in current_metrics.items():
-            if metric_name in previous_metrics:
-                previous_value = previous_metrics[metric_name]
-                change = current_value - previous_value
-                # Используем абсолютное изменение для оценки
-                relative_change = abs(change / (previous_value + 1e-9)) if previous_value != 0 else abs(change)
-
-                change_scores[metric_name] = float(change)
-                changes_detected[metric_name] = bool(relative_change > feature_change_threshold)
-
-                if changes_detected[metric_name]:
-                    significant_changes[metric_name] = {
-                        "current": float(current_value),
-                        "previous": float(previous_value),
-                        "change": float(change),
-                        "relative_change": float(relative_change)
-                    }
-            else:
-                logger.warning(f"Метрика '{metric_name}' не найдена в предыдущих метриках. Изменение не может быть рассчитано.")
-
-        logger.info("Анализ изменений лицевых признаков завершен")
-        return {
-            "changes_detected": changes_detected,
-            "change_scores": change_scores,
-            "significant_changes": significant_changes
-        }
-
-    def get_combined_facial_analysis_results(self, img: np.ndarray, models: Dict[str, Any], previous_metrics: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-        """
-        Объединяет результаты всех этапов 3D-анализа лица в единый комплексный словарь.
-        """
-        logger.info("Начало комбинированного анализа лица...")
-        results = {}
-
+    def _analyze_landmark_trends(self, landmarks_array: np.ndarray) -> Dict[str, Any]:
+        """Анализ трендов изменения ландмарков"""
         try:
-            # 1. Извлечение 68 ландмарок с уверенностью
-            landmarks_3d, confidence_array, param = self.extract_68_landmarks_with_confidence(img, models)
-            results["landmarks_3d"] = landmarks_3d.tolist()
-            results["landmarks_confidence"] = confidence_array.tolist()
-            results["3d_model_params"] = param.tolist()
-            logger.info("Ландмарки и параметры модели извлечены.")
-
-            # 2. Извлечение плотных точек поверхности
-            dense_points = self.extract_dense_surface_points(img, models)
-            results["dense_surface_points"] = dense_points.tolist()
-            logger.info("Плотные точки поверхности извлечены.")
-
-            # 3. Определение точной позы лица
-            pose_analysis = self.determine_precise_face_pose(landmarks_3d, param, confidence_array)
-            results["pose_analysis"] = pose_analysis
-            pose_category = pose_analysis["pose_category"]
-            logger.info(f"Поза лица определена: {pose_category}.")
-
-            # 4. Нормализация ландмарок по категории позы
-            vis = landmarks_3d[:, 2] > MIN_VISIBILITY_Z
-            norm = self.normalize_landmarks_by_pose_category(landmarks_3d, pose_category, vis)
-            results["normalized_landmarks"] = norm.tolist()
-            results["scale"] = 1.0
-            results["center"] = landmarks_3d[30, :3].tolist()
-            logger.info("Ландмарки нормализованы.")
-
-            # 5. Расчет метрик идентичности
-            identity_metrics = self.calculate_identity_signature_metrics(norm, pose_category)
-            results["identity_metrics"] = identity_metrics
-            logger.info("Метрики идентичности рассчитаны.")
-
-            # 6. Расчет комплексной ошибки формы
-            shape_errors = self.calculate_comprehensive_shape_error(norm)
-            results["shape_errors"] = shape_errors
-            logger.info("Ошибки формы рассчитаны.")
-
-            # 7. Анализ асимметрии лица
-            asymmetry_results = self.analyze_facial_asymmetry(landmarks_3d, confidence_array)
-            results["facial_asymmetry"] = asymmetry_results
-            logger.info("Асимметрия лица проанализирована.")
-
-            # 8. Кросс-валидация ландмарок
-            # Для простоты, используем текущие ландмарки как единственный набор для кросс-валидации.
-            # В реальном сценарии здесь будет список ландмарок из нескольких кадров/источников.
-            cross_validation_results = self.perform_cross_validation_landmarks([landmarks_3d], [confidence_array])
-            results["landmark_cross_validation"] = cross_validation_results
-            logger.info("Кросс-валидация ландмарок выполнена.")
-
-            # 9. Анализ изменений лицевых признаков (если есть предыдущие метрики)
-            if previous_metrics:
-                feature_changes = self.analyze_facial_features_changes(identity_metrics, previous_metrics)
-                results["feature_changes"] = feature_changes
-                logger.info("Изменения лицевых признаков проанализированы.")
+            # Расчет средних смещений между соседними кадрами
+            displacements = np.diff(landmarks_array, axis=0)
+            mean_displacement = np.mean(np.linalg.norm(displacements, axis=2))
+            
+            # Направление общего тренда
+            total_displacement = landmarks_array[-1] - landmarks_array[0]
+            trend_vector = np.mean(total_displacement, axis=0)
+            trend_magnitude = np.linalg.norm(trend_vector)
+            
+            # Классификация направления
+            if trend_magnitude < 1.0:
+                direction = 'stable'
+            elif abs(trend_vector[1]) > abs(trend_vector[0]):
+                direction = 'vertical' if trend_vector[1] > 0 else 'vertical_up'
             else:
-                results["feature_changes"] = {"changes_detected": {}, "change_scores": {}, "significant_changes": {}}
-                logger.info("Предыдущие метрики не предоставлены, анализ изменений пропущен.")
+                direction = 'horizontal_right' if trend_vector[0] > 0 else 'horizontal_left'
+            
+            return {
+                'magnitude': trend_magnitude,
+                'direction': direction,
+                'mean_displacement': float(mean_displacement)
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа трендов: {e}")
+            return {'magnitude': 0.0, 'direction': 'unknown', 'mean_displacement': 0.0}
 
-            logger.info("Комбинированный анализ лица завершен успешно.")
-            return results
+    def get_processing_statistics(self) -> Dict[str, Any]:
+        """
+        Получение статистики обработки
+        
+        Returns:
+            Словарь со статистикой
+        """
+        stats = self.processing_stats.copy()
+        
+        if stats['total_processed'] > 0:
+            stats['success_rate'] = stats['successful_extractions'] / stats['total_processed']
+            stats['cache_hit_rate'] = stats['cache_hits'] / stats['total_processed']
+        else:
+            stats['success_rate'] = 0.0
+            stats['cache_hit_rate'] = 0.0
+        
+        # Информация о модели
+        stats['model_info'] = {
+            'device': self.model_config.device,
+            'use_mps': self.model_config.use_mps,
+            'dense_mesh_enabled': self.model_config.enable_dense_mesh,
+            'model_loaded': self.ddfa_model is not None,
+            'bfm_loaded': self.bfm_model is not None,
+            'model_version': self.model_config.model_version
+        }
+        
+        # Информация о кэше
+        stats['cache_info'] = {
+            'cache_size_mb': self.cache_size_mb,
+            'cache_entries': len(self.landmarks_cache),
+            'max_cache_size_mb': self.max_cache_size_mb
+        }
+        
+        # Производительность
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        stats['performance'] = {
+            'memory_usage_mb': memory_info.rss / (1024 * 1024),
+            'cpu_percent': process.cpu_percent(),
+            'thread_count': process.num_threads()
+        }
+        
+        return stats
+
+    def _save_to_cache(self, cache_key: str, package: LandmarksPackage):
+        """Сохранение пакета в кэш"""
+        try:
+            self.landmarks_cache[cache_key] = package
+            
+            # Проверка лимита кэша
+            if self.cache_size_mb > self.max_cache_size_mb:
+                self._cleanup_cache()
                 
         except Exception as e:
-            logger.error(f"Ошибка при выполнении комбинированного анализа лица: {e}")
-            raise # Перевыбрасываем исключение для обработки на более высоком уровне
+            logger.error(f"Ошибка сохранения в кэш: {e}")
 
-    def self_test(self) -> None:
-        """
-        Метод для самопроверки функциональности Face3DAnalyzer.
-        """
-        logger.info("Запуск самотестирования Face3DAnalyzer...")
+    def _cleanup_cache(self):
+        """Очистка кэша при превышении лимита"""
         try:
-            # Мок-данные для тестирования
-            test_image_path = "/Users/victorkhudyakov/nn/3DDFA2/3/01_01_10.jpg"
-            mock_img = cv2.imread(test_image_path)
-
-            if mock_img is None:
-                logger.error(f"Не удалось загрузить тестовое изображение с пути: {test_image_path}. Проверьте путь и наличие файла.")
-                return
-
-            logger.info(f"Загружено тестовое изображение с размером: {mock_img.shape}")
-
-            mock_models = dict(tddfa=self.tddfa, face_boxes=self.faceboxes) # Используем инициализированные модели
-            mock_confidence = np.full(68, 0.95, dtype=np.float32)
-
-            # Test extract_68_landmarks_with_confidence
-            logger.info("Тестирование extract_68_landmarks_with_confidence...")
-            landmarks, confidence_array, param = self.extract_68_landmarks_with_confidence(mock_img, mock_models)
-            assert landmarks.shape == (68, 3), f"Expected (68,3) landmarks, got {landmarks.shape}"
-            assert confidence_array.shape == (68,), f"Expected (68,) confidence, got {confidence_array.shape}"
-            assert param.shape == (62,), f"Expected (62,) param, got {param.shape}"
-            logger.info("extract_68_landmarks_with_confidence: OK")
-
-            # Test extract_dense_surface_points
-            logger.info("Тестирование extract_dense_surface_points...")
-            dense_points = self.extract_dense_surface_points(mock_img, mock_models)
-            # Убрал жесткую привязку к числу точек, так как оно может незначительно отличаться
-            assert len(dense_points) > 30000, f"Expected more than 30000 dense points, got {len(dense_points)}"
-            logger.info("extract_dense_surface_points: OK")
-
-            # Test determine_precise_face_pose
-            logger.info("Тестирование determine_precise_face_pose...")
-            # Используем landmarks, param и confidence_array, полученные из предыдущего шага
-            pose_results = self.determine_precise_face_pose(landmarks, param, confidence_array)
-            assert 'pose_category' in pose_results and 'angles' in pose_results, "Pose results missing keys"
-            assert len(pose_results['angles']) == 3, "Pose angles should have 3 components"
-            logger.info("determine_precise_face_pose: OK")
-
-            # Test normalize_landmarks_by_pose_category
-            logger.info("Тестирование normalize_landmarks_by_pose_category...")
-            vis = landmarks[:, 2] > MIN_VISIBILITY_Z
-            norm = self.normalize_landmarks_by_pose_category(
-                landmarks,
-                pose_results["pose_category"],
-                vis
+            # Удаляем старые записи
+            sorted_items = sorted(
+                self.landmarks_cache.items(),
+                key=lambda x: x[1].cache_timestamp or datetime.datetime.min
             )
-            iod_after_norm = np.linalg.norm(norm[36, :2] - norm[45, :2])
-            if not (0.8 < iod_after_norm < 1.2):
-                logger.warning(f"Самотест: IOD после нормализации = {iod_after_norm:.3f}, что вне ожидаемого диапазона (0.8–1.2), но тест продолжается.")
-            assert isinstance(norm, np.ndarray), "Normalized landmarks should be a numpy array"
-            logger.info("normalize_landmarks_by_pose_category: OK")
-
-            # Test calculate_identity_signature_metrics
-            logger.info("Тестирование calculate_identity_signature_metrics...")
-            metrics = self.calculate_identity_signature_metrics(norm, "Frontal")
-            assert len(metrics) == 15, f"Expected 15 metrics, got {len(metrics)}"
-            assert all(np.isfinite(list(metrics.values()))), "Metrics contain non-finite values"
-            logger.info("calculate_identity_signature_metrics: OK")
-
-            # Test calculate_comprehensive_shape_error
-            logger.info("Тестирование calculate_comprehensive_shape_error...")
-            # For simplicity, create a dummy reference model if not loaded
-            if self.reference_model_landmarks is None:
-                self.reference_model_landmarks = np.zeros((68, 3), dtype=np.float32) # Dummy reference
-            shape_errors = self.calculate_comprehensive_shape_error(norm)
-            assert 'overall_shape_error' in shape_errors, "Shape errors missing overall_shape_error"
-            assert 'eye_region_error' in shape_errors, "Shape errors missing eye_region_error"
-            assert 'nose_region_error' in shape_errors, "Shape errors missing nose_region_error"
-            assert 'mouth_region_error' in shape_errors, "Shape errors missing mouth_region_error"
-            assert all(isinstance(v, float) for v in shape_errors.values()), "Shape errors values should be float"
-            logger.info("calculate_comprehensive_shape_error: OK")
-
-            # Test analyze_facial_asymmetry
-            logger.info("Тестирование analyze_facial_asymmetry...")
-            asymmetry_results = self.analyze_facial_asymmetry(landmarks, confidence_array)
-            assert 'overall_asymmetry' in asymmetry_results, "Asymmetry results missing overall_asymmetry"
-            assert 'confidence' in asymmetry_results, "Asymmetry results missing confidence"
-            assert 'asymmetry_scores' in asymmetry_results, "Asymmetry results missing asymmetry_scores"
-            logger.info("analyze_facial_asymmetry: OK")
-
-            # Test perform_cross_validation_landmarks
-            logger.info("Тестирование perform_cross_validation_landmarks...")
-            # Create dummy data for all_landmarks and all_confidence_arrays
-            all_landmarks = [landmarks + np.random.rand(68,3)*0.1, landmarks - np.random.rand(68,3)*0.1]
-            all_confidence_arrays = [confidence_array, confidence_array]
-            cross_validation_results = self.perform_cross_validation_landmarks(all_landmarks, all_confidence_arrays)
-            assert 'stability_score' in cross_validation_results, "Cross validation results missing stability_score"
-            assert 'stable' in cross_validation_results, "Cross validation results missing stable"
-            logger.info("perform_cross_validation_landmarks: OK")
-
-            # Test analyze_facial_features_changes
-            logger.info("Тестирование analyze_facial_features_changes...")
-            mock_current_metrics = {
-                "skull_width_ratio": 1.0, "eye_distance_ratio": 0.5, "nose_projection_ratio": 0.2
-            }
-            mock_previous_metrics = {
-                "skull_width_ratio": 1.05, "eye_distance_ratio": 0.4, "nose_projection_ratio": 0.1
-            }
-            feature_changes_results = self.analyze_facial_features_changes(mock_current_metrics, mock_previous_metrics)
-            assert 'changes_detected' in feature_changes_results, "Feature changes results missing changes_detected"
-            assert 'change_scores' in feature_changes_results, "Feature changes results missing change_scores"
-            assert 'significant_changes' in feature_changes_results, "Feature changes results missing significant_changes"
-            assert feature_changes_results['changes_detected']['nose_projection_ratio'] == True # Should detect a significant change
-            assert feature_changes_results['changes_detected']['skull_width_ratio'] == False # Should not be a significant change
-            logger.info("analyze_facial_features_changes: OK")
-
-            # Test get_combined_facial_analysis_results
-            logger.info("Тестирование get_combined_facial_analysis_results...")
-            combined_results = self.get_combined_facial_analysis_results(mock_img, mock_models, mock_previous_metrics)
-            assert "landmarks_3d" in combined_results, "Combined results missing landmarks_3d"
-            assert "dense_surface_points" in combined_results, "Combined results missing dense_surface_points"
-            assert "pose_analysis" in combined_results, "Combined results missing pose_analysis"
-            assert "normalized_landmarks" in combined_results, "Combined results missing normalized_landmarks"
-            assert "identity_metrics" in combined_results, "Combined results missing identity_metrics"
-            assert "shape_errors" in combined_results, "Combined results missing shape_errors"
-            assert "facial_asymmetry" in combined_results, "Combined results missing facial_asymmetry"
-            assert "landmark_cross_validation" in combined_results, "Combined results missing landmark_cross_validation"
-            assert "feature_changes" in combined_results, "Combined results missing feature_changes"
-            logger.info("get_combined_facial_analysis_results: OK")
-
-            logger.info("Самотестирование Face3DAnalyzer завершено успешно!")
+            
+            # Удаляем половину записей
+            items_to_remove = len(sorted_items) // 2
+            for i in range(items_to_remove):
+                del self.landmarks_cache[sorted_items[i][0]]
+            
+            self.cache_size_mb *= 0.5  # Примерная оценка
+            logger.info(f"Кэш очищен: удалено {items_to_remove} записей")
+            
         except Exception as e:
-            logger.error(f"Самотестирование Face3DAnalyzer завершено с ошибками: {e}")
-            raise
+            logger.error(f"Ошибка очистки кэша: {e}")
 
-# ==================== ТОЧКА ВХОДА ====================
+    def clear_cache(self):
+        """Полная очистка кэша результатов"""
+        try:
+            self.landmarks_cache.clear()
+            self.cache_size_mb = 0.0
+            
+            # Очистка файлов кэша
+            for cache_file in self.cache_dir.glob("*.pkl"):
+                cache_file.unlink()
+            
+            logger.info("Кэш Face3DAnalyzer полностью очищен")
+            
+        except Exception as e:
+            logger.error(f"Ошибка очистки кэша: {e}")
+
+    def save_cache(self, cache_filename: str = "face3d_cache.pkl"):
+        """Сохранение кэша на диск"""
+        try:
+            cache_path = self.cache_dir / cache_filename
+            
+            with open(cache_path, 'wb') as f:
+                pickle.dump(self.landmarks_cache, f)
+            
+            logger.info(f"Кэш сохранен: {cache_path}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения кэша: {e}")
+
+    def load_cache(self, cache_filename: str = "face3d_cache.pkl") -> bool:
+        """Загрузка кэша с диска"""
+        try:
+            cache_path = self.cache_dir / cache_filename
+            
+            if cache_path.exists():
+                with open(cache_path, 'rb') as f:
+                    self.landmarks_cache = pickle.load(f)
+                
+                logger.info(f"Кэш загружен: {cache_path}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Ошибка загрузки кэша: {e}")
+            return False
+
+    def __del__(self):
+        """Деструктор для освобождения ресурсов"""
+        try:
+            if hasattr(self, 'thread_pool'):
+                self.thread_pool.shutdown(wait=False)
+            
+            # Очистка GPU памяти
+            if hasattr(torch, 'mps') and torch.mps.is_available():
+                torch.mps.empty_cache()
+                
+        except Exception:
+            pass
+
+# === ФУНКЦИИ САМОТЕСТИРОВАНИЯ ===
+
+def self_test():
+    """Самотестирование модуля face_3d_analyzer"""
+    try:
+        logger.info("Запуск самотестирования face_3d_analyzer...")
+        
+        # Создание экземпляра анализатора
+        analyzer = Face3DAnalyzer()
+        
+        # Создание тестового изображения
+        test_image = np.random.randint(0, 255, (800, 800, 3), dtype=np.uint8)
+        
+        # Тест детекции лиц
+        faces = analyzer.detect_faces(test_image)
+        logger.info(f"Обнаружено лиц: {len(faces)}")
+        
+        # Тест определения категории позы
+        test_angles = {'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0}
+        pose_category = analyzer._determine_pose_category(0.0, 0.0, 0.0)
+        assert pose_category == 'frontal', "Неверная категория позы"
+        
+        # Тест расчета масштабного коэффициента
+        test_landmarks = np.random.rand(68, 3) * 100
+        scale_factor, ref_distance = analyzer._calculate_scale_factor(
+            test_landmarks, [36, 45], 'IOD'
+        )
+        assert scale_factor > 0, "Неверный масштабный коэффициент"
+        
+        # Тест оценки качества лица
+        test_bbox = (100, 100, 200, 200)
+        quality_assessment = analyzer.assess_face_quality(test_image, test_bbox)
+        assert hasattr(quality_assessment, 'overall_quality'), "Отсутствует оценка качества"
+        
+        # Тест статистики
+        stats = analyzer.get_processing_statistics()
+        assert 'success_rate' in stats, "Отсутствует статистика"
+        
+        logger.info("Самотестирование face_3d_analyzer завершено успешно")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка самотестирования: {e}")
+        return False
+
+# === ИНИЦИАЛИЗАЦИЯ ===
 
 if __name__ == "__main__":
-    analyzer = Face3DAnalyzer()
-    analyzer.self_test()
-
-img = cv2.imread("/Users/victorkhudyakov/nn/3DDFA2/3/01_01_10.jpg")
-models = initialize_3ddfa_components("weights", skip_gpu_check=True)
-fa = Face3DAnalyzer(models["tddfa"], models["face_boxes"])
-lmk, conf, _ = fa.extract_68_landmarks_with_confidence(img, models)
-print(lmk.shape, conf.mean())   # => (68, 3) 0.93
-
-from embedding_analyzer import EmbeddingAnalyzer
-ea = EmbeddingAnalyzer()
-emb, c = ea.extract_512d_face_embedding(img, ea.face_app)
-print(bool(emb is not None), c) # => True  ~0.8
+    # Запуск самотестирования при прямом вызове модуля
+    success = self_test()
+    if success:
+        print("✅ Модуль face_3d_analyzer работает корректно")
+        
+        # Демонстрация основной функциональности
+        analyzer = Face3DAnalyzer()
+        print(f"📊 Устройство: {analyzer.model_config.device}")
+        print(f"🔧 MPS доступен: {analyzer.model_config.use_mps}")
+        print(f"📏 Целевой размер: {TARGET_SIZE}")
+        print(f"💾 Кэш-директория: {analyzer.cache_dir}")
+        print(f"🎯 Плотная поверхность: {analyzer.model_config.enable_dense_mesh}")
+        print(f"📈 Максимум точек: {DENSE_SURFACE_PARAMS['dense_points_limit']}")
+    else:
+        print("❌ Обнаружены ошибки в модуле face_3d_analyzer")
+        exit(1)

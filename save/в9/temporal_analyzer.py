@@ -2,7 +2,7 @@
 TemporalAnalyzer - Анализатор временных паттернов и старения лиц
 Версия: 2.0
 Дата: 2025-06-15
-ИСПРАВЛЕНО: Все критические ошибки согласно правкам
+Исправлены все критические ошибки согласно правкам
 """
 
 import numpy as np
@@ -33,7 +33,6 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
 logger = logging.getLogger(__name__)
 
 # Импорт конфигурации
@@ -71,8 +70,7 @@ TEMPORAL_ANALYSIS_PARAMS = {
     "temporal_stability_threshold": 0.8,
     "medical_event_window_days": 30,
     "appearance_frequency_threshold": 0.1,
-    "absence_threshold_days": 90,
-    "z_score_threshold": 2.5
+    "absence_threshold_days": 90
 }
 
 # Медицинские события для корреляции
@@ -93,7 +91,7 @@ class TemporalAnalyzer:
     Анализатор временных паттернов с полной функциональностью
     ИСПРАВЛЕНО: Все критические ошибки согласно правкам
     """
-
+    
     def __init__(self):
         """Инициализация анализатора временных паттернов"""
         logger.info("Инициализация TemporalAnalyzer")
@@ -129,6 +127,7 @@ class TemporalAnalyzer:
             
             logger.info(f"Загружено {len(events)} медицинских событий")
             return events
+            
         except Exception as e:
             logger.error(f"Ошибка загрузки медицинских событий: {e}")
             return {}
@@ -141,7 +140,7 @@ class TemporalAnalyzer:
         if not chronological_data or len(chronological_data) < self.analysis_params["min_data_points"]:
             logger.warning("Недостаточно данных для построения модели старения")
             return self._get_default_aging_model()
-
+        
         try:
             logger.info(f"Построение медицинской модели старения на {len(chronological_data)} точках")
             
@@ -206,6 +205,7 @@ class TemporalAnalyzer:
                         aging_metrics[metric] = values
             
             return aging_metrics
+            
         except Exception as e:
             logger.error(f"Ошибка извлечения метрик старения: {e}")
             return {}
@@ -281,7 +281,7 @@ class TemporalAnalyzer:
                 
                 validation_results["bone_stability_validated"] = np.mean(bone_stability_scores) > 0.5
             
-            # ИСПРАВЛЕНО: Валидация физиологических лимитов
+            # ИСПРАВLЕНО: Валидация физиологических лимитов
             physiological_valid = True
             for metric_name, model_data in aging_model["metrics_models"].items():
                 aging_rate = abs(model_data["aging_rate_per_year"])
@@ -338,6 +338,7 @@ class TemporalAnalyzer:
         """
         try:
             logger.info(f"Предсказание метрик для возраста: {target_age}")
+            
             predicted_metrics = {}
             
             if aging_model["model_type"] == "default":
@@ -385,11 +386,12 @@ class TemporalAnalyzer:
                     constrained_metrics[metric_name] = np.clip(value, min_val, max_val)
             
             return constrained_metrics
+            
         except Exception as e:
             logger.error(f"Ошибка применения ограничений: {e}")
             return metrics
 
-    def detect_temporal_anomalies_in_metrics(self, chronological_data: List[Dict[str, Any]],
+    def detect_temporal_anomalies_in_metrics(self, chronological_data: List[Dict[str, Any]], 
                                            aging_model: Dict[str, Any]) -> Dict[str, Any]:
         """
         ИСПРАВЛЕНО: Обнаружение временных аномалий в метриках
@@ -398,7 +400,7 @@ class TemporalAnalyzer:
         if not chronological_data:
             logger.warning("Нет данных для анализа временных аномалий")
             return {}
-
+        
         try:
             logger.info(f"Анализ временных аномалий в {len(chronological_data)} точках")
             
@@ -458,8 +460,8 @@ class TemporalAnalyzer:
             # ИСПРАВЛЕНО: Z-score аномалии
             z_scores = np.abs(stats.zscore(values))
             z_threshold = TEMPORAL_ANALYSIS_PARAMS.get("z_score_threshold", 2.5)
-            z_anomaly_indices = np.where(z_scores > z_threshold)[0]
             
+            z_anomaly_indices = np.where(z_scores > z_threshold)[0]
             for idx in z_anomaly_indices:
                 anomalies["z_score_anomalies"].append({
                     "date": df.iloc[values.index[idx]]['date'],
@@ -473,8 +475,8 @@ class TemporalAnalyzer:
             if len(values) > 1:
                 diffs = np.diff(values)
                 diff_threshold = np.std(diffs) * 3  # 3 стандартных отклонения
-                rapid_indices = np.where(np.abs(diffs) > diff_threshold)[0]
                 
+                rapid_indices = np.where(np.abs(diffs) > diff_threshold)[0]
                 for idx in rapid_indices:
                     anomalies["rapid_change_anomalies"].append({
                         "date": df.iloc[values.index[idx+1]]['date'],
@@ -529,7 +531,7 @@ class TemporalAnalyzer:
         if not identity_timeline:
             logger.warning("Нет данных временной линии для анализа смены идентичности")
             return {}
-
+        
         try:
             logger.info(f"Анализ паттернов смены идентичности для {len(identity_timeline)} идентичностей")
             
@@ -557,6 +559,7 @@ class TemporalAnalyzer:
                 
                 if current_end and next_start:
                     gap_days = (next_start - current_end).days
+                    
                     transition = {
                         "from_identity": current_identity[0],
                         "to_identity": next_identity[0],
@@ -628,7 +631,6 @@ class TemporalAnalyzer:
             # Анализ периодичности
             if len(transitions) >= 4:
                 gaps = [t.get("gap_days", 0) for t in transitions]
-                
                 # Поиск периодических паттернов
                 for period in [30, 60, 90, 180, 365]:  # Месяц, 2 месяца, квартал, полгода, год
                     periodic_matches = sum(1 for gap in gaps if abs(gap % period) < 7 or abs(gap % period) > period - 7)
@@ -655,9 +657,10 @@ class TemporalAnalyzer:
         if not cluster_results or "cluster_metadata" not in cluster_results:
             logger.warning("Нет данных кластеризации для построения временной линии")
             return {}
-
+        
         try:
             logger.info("Построение временной линии появлений идентичностей")
+            
             timeline = {}
             
             for cluster_id, metadata in cluster_results["cluster_metadata"].items():
@@ -710,6 +713,7 @@ class TemporalAnalyzer:
             activity_periods = []
             current_period_start = dates[0]
             last_date = dates[0]
+            
             max_gap = timedelta(days=self.analysis_params["absence_threshold_days"])
             
             for date in dates[1:]:
@@ -803,7 +807,7 @@ class TemporalAnalyzer:
             logger.error(f"Ошибка расчета статистик появлений: {e}")
             return {}
 
-    def perform_seasonal_decomposition(self, chronological_data: List[Dict[str, Any]],
+    def perform_seasonal_decomposition(self, chronological_data: List[Dict[str, Any]], 
                                      metric_name: str = "authenticity_score") -> Dict[str, Any]:
         """
         ИСПРАВЛЕНО: Сезонная декомпозиция временных рядов
@@ -812,7 +816,7 @@ class TemporalAnalyzer:
         if not chronological_data or len(chronological_data) < 24:  # Минимум 2 года данных
             logger.warning("Недостаточно данных для сезонной декомпозиции")
             return {}
-
+        
         try:
             logger.info(f"Сезонная декомпозиция для метрики: {metric_name}")
             
@@ -834,8 +838,8 @@ class TemporalAnalyzer:
             
             # ИСПРАВЛЕНО: Сезонная декомпозиция
             decomposition = seasonal_decompose(
-                df_resampled,
-                model='additive',
+                df_resampled, 
+                model='additive', 
                 period=12,  # Годовая сезонность
                 extrapolate_trend='freq'
             )
@@ -926,7 +930,7 @@ class TemporalAnalyzer:
             logger.error(f"Ошибка анализа тренда: {e}")
             return {}
 
-    def detect_changepoints(self, chronological_data: List[Dict[str, Any]],
+    def detect_changepoints(self, chronological_data: List[Dict[str, Any]], 
                           metric_name: str = "authenticity_score") -> Dict[str, Any]:
         """
         ИСПРАВЛЕНО: Обнаружение точек изменения с ruptures
@@ -935,7 +939,7 @@ class TemporalAnalyzer:
         if not chronological_data or len(chronological_data) < 10:
             logger.warning("Недостаточно данных для обнаружения точек изменения")
             return {}
-
+        
         try:
             logger.info(f"Обнаружение точек изменения для метрики: {metric_name}")
             
@@ -959,6 +963,7 @@ class TemporalAnalyzer:
             # ИСПРАВЛЕНО: Обнаружение точек изменения с ruptures
             model = "rbf"  # Radial basis function model
             penalty = self.analysis_params["changepoint_penalty"]
+            
             algo = rpt.Pelt(model=model).fit(signal)
             changepoints = algo.predict(pen=penalty)
             
@@ -1011,7 +1016,7 @@ class TemporalAnalyzer:
             logger.error(f"Ошибка обнаружения точек изменения: {e}")
             return {}
 
-    def _correlate_with_medical_events(self, changepoint_date: datetime,
+    def _correlate_with_medical_events(self, changepoint_date: datetime, 
                                      window_days: int = 30) -> Optional[Dict[str, Any]]:
         """Корреляция точки изменения с медицинскими событиями"""
         try:
@@ -1032,7 +1037,7 @@ class TemporalAnalyzer:
             logger.error(f"Ошибка корреляции с медицинскими событиями: {e}")
             return None
 
-    def _analyze_changepoint_segments(self, signal: np.ndarray, changepoints: List[int],
+    def _analyze_changepoint_segments(self, signal: np.ndarray, changepoints: List[int], 
                                     dates: np.ndarray) -> List[Dict[str, Any]]:
         """Анализ сегментов между точками изменения"""
         try:
@@ -1092,7 +1097,7 @@ class TemporalAnalyzer:
         if not anomalies or not self.medical_events:
             logger.warning("Нет данных для корреляции аномалий с медицинскими событиями")
             return {}
-
+        
         try:
             logger.info("Корреляция аномалий с медицинскими событиями")
             
@@ -1119,6 +1124,7 @@ class TemporalAnalyzer:
                     correlated_events = []
                     for event_date, event_info in self.medical_events.items():
                         days_diff = abs((anomaly_date - event_date).days)
+                        
                         if days_diff <= window_days:
                             correlated_events.append({
                                 "event_date": event_date,
@@ -1149,7 +1155,6 @@ class TemporalAnalyzer:
                                 "event_info": closest_event["event_info"],
                                 "correlated_anomalies": []
                             }
-                        
                         correlations["event_correlations"][event_key]["correlated_anomalies"].append(correlation_entry)
             
             # ИСПРАВЛЕНО: Статистики корреляций
@@ -1242,787 +1247,13 @@ class TemporalAnalyzer:
             if cache_path.exists():
                 with open(cache_path, 'rb') as f:
                     self.analysis_cache = pickle.load(f)
+                
                 logger.info(f"Кэш анализа загружен: {cache_path}")
             else:
                 logger.info("Файл кэша не найден, используется пустой кэш")
                 
         except Exception as e:
             logger.error(f"Ошибка загрузки кэша: {e}")
-
-    def calculate_putin_age_on_each_date(self, dates: List[datetime]) -> Dict[datetime, float]:
-        """
-        ИСПРАВЛЕНО: Расчет возраста Путина на каждую дату
-        Согласно правкам: точный расчет от даты рождения 1952-10-07
-        """
-        try:
-            logger.info(f"Расчет возраста для {len(dates)} дат")
-            age_mapping = {}
-            
-            birth_date = datetime.combine(PUTIN_BIRTH_DATE, datetime.min.time())
-            
-            for date in dates:
-                if isinstance(date, str):
-                    # Парсинг строковых дат
-                    try:
-                        date = datetime.strptime(date, '%d_%m_%y')
-                    except ValueError:
-                        try:
-                            date = datetime.strptime(date, '%Y-%m-%d')
-                        except ValueError:
-                            logger.warning(f"Неверный формат даты: {date}")
-                            continue
-                
-                # Точный расчет возраста в годах
-                age_delta = date - birth_date
-                age_years = age_delta.days / 365.25  # Учет високосных годов
-                
-                age_mapping[date] = float(age_years)
-            
-            logger.info(f"Возраст рассчитан для {len(age_mapping)} дат")
-            return age_mapping
-            
-        except Exception as e:
-            logger.error(f"Ошибка расчета возраста: {e}")
-            return {}
-
-    def validate_aging_consistency_for_identity(self, identity_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        ИСПРАВЛЕНО: Валидация консистентности старения для идентичности
-        Согласно правкам: медицинская валидация старения
-        """
-        try:
-            logger.info("Валидация консистентности старения")
-            
-            validation_result = {
-                "is_consistent": True,
-                "consistency_score": 1.0,
-                "medical_plausibility": 1.0,
-                "violations": [],
-                "bone_structure_changes": [],
-                "soft_tissue_changes": [],
-                "temporal_gaps": [],
-                "surgical_evidence": [],
-                "aging_rate_analysis": {}
-            }
-            
-            if not identity_data or "temporal_points" not in identity_data:
-                validation_result["is_consistent"] = False
-                validation_result["violations"].append("Недостаточно данных для валидации")
-                return validation_result
-            
-            temporal_points = identity_data["temporal_points"]
-            if len(temporal_points) < 2:
-                validation_result["violations"].append("Менее 2 временных точек")
-                return validation_result
-            
-            # Сортировка по возрасту
-            sorted_points = sorted(temporal_points, key=lambda p: p.get("age", 0))
-            
-            # ИСПРАВЛЕНО: Анализ изменений костных структур
-            bone_metrics = [
-                "skull_width_ratio", "interpupillary_distance_ratio", 
-                "zygomatic_arch_width", "mandible_width_ratio"
-            ]
-            
-            for metric in bone_metrics:
-                bone_changes = self._analyze_bone_metric_changes(sorted_points, metric)
-                if bone_changes["significant_change"]:
-                    validation_result["bone_structure_changes"].append(bone_changes)
-                    validation_result["consistency_score"] *= 0.7
-            
-            # ИСПРАВЛЕНО: Анализ изменений мягких тканей
-            soft_tissue_metrics = [
-                "cheek_fullness_ratio", "nasolabial_depth", 
-                "skin_texture_score", "facial_volume_ratio"
-            ]
-            
-            for metric in soft_tissue_metrics:
-                tissue_changes = self._analyze_soft_tissue_changes(sorted_points, metric)
-                validation_result["soft_tissue_changes"].append(tissue_changes)
-            
-            # ИСПРАВЛЕНО: Анализ временных разрывов
-            temporal_gaps = self._analyze_temporal_gaps(sorted_points)
-            validation_result["temporal_gaps"] = temporal_gaps
-            
-            # ИСПРАВЛЕНО: Поиск признаков хирургического вмешательства
-            surgical_evidence = self._detect_surgical_intervention_evidence(sorted_points)
-            validation_result["surgical_evidence"] = surgical_evidence
-            
-            # ИСПРАВЛЕНО: Анализ скорости старения
-            aging_analysis = self._analyze_aging_rates(sorted_points)
-            validation_result["aging_rate_analysis"] = aging_analysis
-            
-            # Финальная оценка консистентности
-            if len(validation_result["bone_structure_changes"]) > 2:
-                validation_result["is_consistent"] = False
-                validation_result["consistency_score"] *= 0.3
-            
-            if len(surgical_evidence) > 0:
-                validation_result["medical_plausibility"] *= 0.5
-            
-            # Общая медицинская правдоподобность
-            validation_result["medical_plausibility"] = min(
-                validation_result["consistency_score"],
-                validation_result["medical_plausibility"]
-            )
-            
-            logger.info(f"Валидация завершена. Консистентность: {validation_result['consistency_score']:.3f}")
-            return validation_result
-            
-        except Exception as e:
-            logger.error(f"Ошибка валидации старения: {e}")
-            return {
-                "is_consistent": False,
-                "consistency_score": 0.0,
-                "medical_plausibility": 0.0,
-                "error": str(e)
-            }
-
-    def _analyze_bone_metric_changes(self, temporal_points: List[Dict], metric_name: str) -> Dict[str, Any]:
-        """Анализ изменений костных метрик"""
-        try:
-            values = []
-            ages = []
-            
-            for point in temporal_points:
-                if metric_name in point.get("metrics", {}):
-                    values.append(point["metrics"][metric_name])
-                    ages.append(point.get("age", 0))
-            
-            if len(values) < 2:
-                return {
-                    "metric_name": metric_name,
-                    "significant_change": False,
-                    "change_rate": 0.0,
-                    "medical_explanation": "Недостаточно данных"
-                }
-            
-            # Линейная регрессия для определения тренда
-            slope, intercept, r_value, p_value, std_err = stats.linregress(ages, values)
-            
-            # Костные структуры должны быть стабильными после 25 лет
-            max_allowed_change = 0.005  # 0.5% в год максимум
-            significant_change = abs(slope) > max_allowed_change
-            
-            return {
-                "metric_name": metric_name,
-                "significant_change": significant_change,
-                "change_rate": float(slope),
-                "r_squared": float(r_value ** 2),
-                "p_value": float(p_value),
-                "medical_explanation": self._generate_bone_change_explanation(metric_name, slope, significant_change)
-            }
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа костной метрики {metric_name}: {e}")
-            return {
-                "metric_name": metric_name,
-                "significant_change": False,
-                "change_rate": 0.0,
-                "medical_explanation": f"Ошибка анализа: {str(e)}"
-            }
-
-    def _analyze_soft_tissue_changes(self, temporal_points: List[Dict], metric_name: str) -> Dict[str, Any]:
-        """Анализ изменений мягких тканей"""
-        try:
-            values = []
-            ages = []
-            
-            for point in temporal_points:
-                if metric_name in point.get("metrics", {}):
-                    values.append(point["metrics"][metric_name])
-                    ages.append(point.get("age", 0))
-            
-            if len(values) < 2:
-                return {
-                    "metric_name": metric_name,
-                    "aging_rate": 0.0,
-                    "expected_rate": 0.0,
-                    "deviation": 0.0
-                }
-            
-            # Анализ тренда
-            slope, _, r_value, p_value, _ = stats.linregress(ages, values)
-            
-            # Ожидаемая скорость старения для мягких тканей
-            expected_rates = {
-                "cheek_fullness_ratio": -0.01,  # 1% потеря в год
-                "nasolabial_depth": 0.02,       # 2% углубление в год
-                "skin_texture_score": -0.015,   # 1.5% деградация в год
-                "facial_volume_ratio": -0.008   # 0.8% потеря в год
-            }
-            
-            expected_rate = expected_rates.get(metric_name, -0.01)
-            deviation = abs(slope - expected_rate) / abs(expected_rate) if expected_rate != 0 else 0
-            
-            return {
-                "metric_name": metric_name,
-                "aging_rate": float(slope),
-                "expected_rate": expected_rate,
-                "deviation": float(deviation),
-                "r_squared": float(r_value ** 2),
-                "significant": p_value < 0.05
-            }
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа мягких тканей {metric_name}: {e}")
-            return {
-                "metric_name": metric_name,
-                "aging_rate": 0.0,
-                "expected_rate": 0.0,
-                "deviation": 0.0
-            }
-
-    def _analyze_temporal_gaps(self, temporal_points: List[Dict]) -> List[Dict[str, Any]]:
-        """Анализ временных разрывов"""
-        try:
-            gaps = []
-            
-            for i in range(len(temporal_points) - 1):
-                current_date = temporal_points[i].get("date")
-                next_date = temporal_points[i + 1].get("date")
-                
-                if current_date and next_date:
-                    gap_days = (next_date - current_date).days
-                    
-                    if gap_days > self.analysis_params["max_gap_days"]:
-                        gaps.append({
-                            "start_date": current_date,
-                            "end_date": next_date,
-                            "gap_days": gap_days,
-                            "severity": "critical" if gap_days > 365 else "moderate" if gap_days > 180 else "minor"
-                        })
-            
-            return gaps
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа временных разрывов: {e}")
-            return []
-
-    def _detect_surgical_intervention_evidence(self, temporal_points: List[Dict]) -> List[Dict[str, Any]]:
-        """Детекция признаков хирургического вмешательства"""
-        try:
-            surgical_evidence = []
-            
-            for i in range(len(temporal_points) - 1):
-                current_point = temporal_points[i]
-                next_point = temporal_points[i + 1]
-                
-                time_diff = (next_point.get("date") - current_point.get("date")).days
-                
-                # Анализ быстрых изменений
-                rapid_changes = []
-                
-                for metric in ["cheek_fullness_ratio", "nasolabial_depth", "facial_volume_ratio"]:
-                    current_val = current_point.get("metrics", {}).get(metric, 0)
-                    next_val = next_point.get("metrics", {}).get(metric, 0)
-                    
-                    if current_val != 0:
-                        change_rate = abs(next_val - current_val) / current_val
-                        
-                        # Если изменение > 10% за короткий период
-                        if change_rate > 0.1 and time_diff < 180:
-                            rapid_changes.append({
-                                "metric": metric,
-                                "change_rate": change_rate,
-                                "time_days": time_diff
-                            })
-                
-                if len(rapid_changes) >= 2:  # Множественные быстрые изменения
-                    surgical_evidence.append({
-                        "date_range": (current_point.get("date"), next_point.get("date")),
-                        "evidence_type": "rapid_multiple_changes",
-                        "changes": rapid_changes,
-                        "confidence": 0.8 if len(rapid_changes) >= 3 else 0.6
-                    })
-            
-            return surgical_evidence
-            
-        except Exception as e:
-            logger.error(f"Ошибка детекции хирургического вмешательства: {e}")
-            return []
-
-    def _analyze_aging_rates(self, temporal_points: List[Dict]) -> Dict[str, Any]:
-        """Анализ скорости старения"""
-        try:
-            aging_analysis = {
-                "overall_aging_rate": 0.0,
-                "accelerated_periods": [],
-                "decelerated_periods": [],
-                "medical_consistency": True
-            }
-            
-            if len(temporal_points) < 3:
-                return aging_analysis
-            
-            # Анализ общей скорости старения
-            ages = [p.get("age", 0) for p in temporal_points]
-            overall_scores = []
-            
-            for point in temporal_points:
-                metrics = point.get("metrics", {})
-                # Комбинированный балл старения
-                aging_score = (
-                    metrics.get("skin_texture_score", 0.5) * 0.4 +
-                    metrics.get("facial_volume_ratio", 0.5) * 0.3 +
-                    metrics.get("cheek_fullness_ratio", 0.5) * 0.3
-                )
-                overall_scores.append(aging_score)
-            
-            if len(overall_scores) >= 3:
-                slope, _, r_value, p_value, _ = stats.linregress(ages, overall_scores)
-                aging_analysis["overall_aging_rate"] = float(slope)
-                aging_analysis["r_squared"] = float(r_value ** 2)
-                aging_analysis["significant"] = p_value < 0.05
-                
-                # Ожидаемая скорость старения: -1.5% в год после 40 лет
-                expected_rate = -0.015
-                deviation = abs(slope - expected_rate) / abs(expected_rate)
-                
-                aging_analysis["medical_consistency"] = deviation < 2.0  # В пределах 200% от нормы
-            
-            return aging_analysis
-            
-        except Exception as e:
-            logger.error(f"Ошибка анализа скорости старения: {e}")
-            return {
-                "overall_aging_rate": 0.0,
-                "accelerated_periods": [],
-                "decelerated_periods": [],
-                "medical_consistency": False
-            }
-
-    def _generate_bone_change_explanation(self, metric_name: str, change_rate: float, significant: bool) -> str:
-        """Генерация медицинского объяснения изменений костей"""
-        try:
-            explanations = {
-                "skull_width_ratio": "ширина черепа",
-                "interpupillary_distance_ratio": "межзрачковое расстояние",
-                "zygomatic_arch_width": "ширина скуловых дуг",
-                "mandible_width_ratio": "ширина нижней челюсти"
-            }
-            
-            metric_desc = explanations.get(metric_name, metric_name)
-            
-            if not significant:
-                return f"Изменения {metric_desc} в пределах нормы ({change_rate*100:.2f}%/год)"
-            
-            if change_rate > 0:
-                direction = "увеличение"
-            else:
-                direction = "уменьшение"
-            
-            return f"Значительное {direction} {metric_desc} ({change_rate*100:.2f}%/год), что медицински маловероятно для костных структур после 25 лет"
-            
-        except Exception as e:
-            logger.error(f"Ошибка генерации объяснения: {e}")
-            return f"Изменение {metric_name}: {change_rate*100:.2f}%/год"
-
-    def calibrate_temporal_analysis_thresholds(self, historical_data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        ИСПРАВЛЕНО: Калибровка порогов временного анализа
-        Согласно правкам: автокалибровка на исторических данных
-        """
-        try:
-            logger.info(f"Калибровка порогов на {len(historical_data)} образцах")
-            
-            calibration_result = {
-                "calibrated_thresholds": {},
-                "statistical_baselines": {},
-                "confidence_intervals": {},
-                "calibration_quality": 0.0
-            }
-            
-            if len(historical_data) < 50:
-                logger.warning("Недостаточно данных для надежной калибровки")
-                return calibration_result
-            
-            # Подготовка данных
-            df = pd.DataFrame(historical_data)
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date')
-            
-            # Калибровка порогов Z-score
-            metrics_for_calibration = [
-                'authenticity_score', 'shape_error', 'asymmetry_score',
-                'texture_entropy', 'embedding_confidence'
-            ]
-            
-            for metric in metrics_for_calibration:
-                if metric in df.columns:
-                    values = df[metric].dropna()
-                    
-                    if len(values) >= 30:
-                        # Статистические характеристики
-                        mean_val = float(np.mean(values))
-                        std_val = float(np.std(values))
-                        
-                        # Калибровка порога аномалий (95-й процентиль)
-                        anomaly_threshold = float(np.percentile(np.abs(stats.zscore(values)), 95))
-                        
-                        calibration_result["calibrated_thresholds"][metric] = {
-                            "z_score_threshold": anomaly_threshold,
-                            "rapid_change_threshold": std_val * 3,
-                            "baseline_mean": mean_val,
-                            "baseline_std": std_val
-                        }
-                        
-                        # Доверительные интервалы
-                        ci_lower = float(np.percentile(values, 2.5))
-                        ci_upper = float(np.percentile(values, 97.5))
-                        
-                        calibration_result["confidence_intervals"][metric] = {
-                            "lower_95": ci_lower,
-                            "upper_95": ci_upper,
-                            "range": ci_upper - ci_lower
-                        }
-            
-            # Калибровка временных параметров
-            if 'date' in df.columns and len(df) > 10:
-                # Анализ типичных интервалов между снимками
-                df_sorted = df.sort_values('date')
-                intervals = []
-                
-                for i in range(len(df_sorted) - 1):
-                    interval = (df_sorted.iloc[i+1]['date'] - df_sorted.iloc[i]['date']).days
-                    intervals.append(interval)
-                
-                if intervals:
-                    median_interval = float(np.median(intervals))
-                    max_gap_calibrated = float(np.percentile(intervals, 90))  # 90-й процентиль
-                    
-                    calibration_result["calibrated_thresholds"]["temporal"] = {
-                        "median_interval_days": median_interval,
-                        "max_gap_days": max_gap_calibrated,
-                        "absence_threshold_days": max_gap_calibrated * 1.5
-                    }
-            
-            # Оценка качества калибровки
-            quality_scores = []
-            for metric_data in calibration_result["calibrated_thresholds"].values():
-                if isinstance(metric_data, dict) and "baseline_std" in metric_data:
-                    # Качество на основе стабильности стандартного отклонения
-                    quality = 1.0 / (1.0 + metric_data["baseline_std"])
-                    quality_scores.append(quality)
-            
-            calibration_result["calibration_quality"] = float(np.mean(quality_scores)) if quality_scores else 0.0
-            
-            # Обновление параметров анализа
-            self._update_analysis_params_from_calibration(calibration_result["calibrated_thresholds"])
-            
-            logger.info(f"Калибровка завершена. Качество: {calibration_result['calibration_quality']:.3f}")
-            return calibration_result
-            
-        except Exception as e:
-            logger.error(f"Ошибка калибровки порогов: {e}")
-            return {
-                "calibrated_thresholds": {},
-                "statistical_baselines": {},
-                "confidence_intervals": {},
-                "calibration_quality": 0.0,
-                "error": str(e)
-            }
-
-    def _update_analysis_params_from_calibration(self, calibrated_thresholds: Dict[str, Any]) -> None:
-        """Обновление параметров анализа из калибровки"""
-        try:
-            # Обновление Z-score порогов
-            z_scores = []
-            for metric_data in calibrated_thresholds.values():
-                if isinstance(metric_data, dict) and "z_score_threshold" in metric_data:
-                    z_scores.append(metric_data["z_score_threshold"])
-            
-            if z_scores:
-                self.analysis_params["z_score_threshold"] = float(np.mean(z_scores))
-            
-            # Обновление временных параметров
-            if "temporal" in calibrated_thresholds:
-                temporal_params = calibrated_thresholds["temporal"]
-                
-                if "max_gap_days" in temporal_params:
-                    self.analysis_params["max_gap_days"] = int(temporal_params["max_gap_days"])
-                
-                if "absence_threshold_days" in temporal_params:
-                    self.analysis_params["absence_threshold_days"] = int(temporal_params["absence_threshold_days"])
-            
-            logger.info("Параметры анализа обновлены из калибровки")
-            
-        except Exception as e:
-            logger.error(f"Ошибка обновления параметров: {e}")
-
-    def export_temporal_analysis_report(self, analysis_results: Dict[str, Any], 
-                                    output_format: str = "json") -> str:
-        """
-        ИСПРАВЛЕНО: Экспорт отчета временного анализа
-        Согласно правкам: поддержка множественных форматов
-        """
-        try:
-            logger.info(f"Экспорт отчета в формате {output_format}")
-            
-            # Подготовка данных отчета
-            report_data = {
-                "metadata": {
-                    "analysis_date": datetime.now().isoformat(),
-                    "analyzer_version": "2.0",
-                    "putin_birth_date": PUTIN_BIRTH_DATE.isoformat(),
-                    "analysis_parameters": self.analysis_params
-                },
-                "results": analysis_results,
-                "summary": self._generate_analysis_summary(analysis_results)
-            }
-            
-            # Определение пути выходного файла
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            if output_format.lower() == "json":
-                output_path = CACHE_DIR / f"temporal_analysis_report_{timestamp}.json"
-                
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    json.dump(report_data, f, indent=2, ensure_ascii=False, default=str)
-                    
-            elif output_format.lower() == "csv":
-                output_path = CACHE_DIR / f"temporal_analysis_report_{timestamp}.csv"
-                
-                # Преобразование в табличный формат
-                df = self._convert_results_to_dataframe(analysis_results)
-                df.to_csv(output_path, index=False, encoding='utf-8')
-                
-            elif output_format.lower() == "html":
-                output_path = CACHE_DIR / f"temporal_analysis_report_{timestamp}.html"
-                
-                html_content = self._generate_html_report(report_data)
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
-                    
-            else:
-                raise ValueError(f"Неподдерживаемый формат: {output_format}")
-            
-            logger.info(f"Отчет экспортирован: {output_path}")
-            return str(output_path)
-            
-        except Exception as e:
-            logger.error(f"Ошибка экспорта отчета: {e}")
-            return ""
-
-    def _generate_analysis_summary(self, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Генерация сводки анализа"""
-        try:
-            summary = {
-                "total_anomalies": 0,
-                "critical_findings": [],
-                "identity_switches": 0,
-                "medical_inconsistencies": 0,
-                "temporal_coverage": {},
-                "confidence_score": 0.0
-            }
-            
-            # Подсчет аномалий
-            if "anomalies" in analysis_results:
-                summary["total_anomalies"] = analysis_results["anomalies"].get("total_anomalies", 0)
-            
-            # Анализ переключений идентичности
-            if "identity_switching" in analysis_results:
-                switching_data = analysis_results["identity_switching"]
-                summary["identity_switches"] = len(switching_data.get("identity_transitions", []))
-                
-                if switching_data.get("systematic_patterns_detected", False):
-                    summary["critical_findings"].append("Систематические паттерны смены идентичности")
-            
-            # Медицинские несоответствия
-            if "aging_validation" in analysis_results:
-                validation = analysis_results["aging_validation"]
-                if not validation.get("is_consistent", True):
-                    summary["medical_inconsistencies"] += 1
-                    summary["critical_findings"].append("Медицински неправдоподобное старение")
-            
-            # Временное покрытие
-            if "timeline" in analysis_results:
-                timeline = analysis_results["timeline"]
-                dates = []
-                
-                for identity_data in timeline.values():
-                    date_range = identity_data.get("date_range", {})
-                    if "start" in date_range and "end" in date_range:
-                        dates.extend([date_range["start"], date_range["end"]])
-                
-                if dates:
-                    summary["temporal_coverage"] = {
-                        "start_date": min(dates).isoformat() if dates else None,
-                        "end_date": max(dates).isoformat() if dates else None,
-                        "total_span_days": (max(dates) - min(dates)).days if len(dates) >= 2 else 0
-                    }
-            
-            # Общий балл достоверности
-            confidence_factors = []
-            
-            if summary["total_anomalies"] == 0:
-                confidence_factors.append(1.0)
-            else:
-                confidence_factors.append(max(0.0, 1.0 - summary["total_anomalies"] / 100.0))
-            
-            if summary["medical_inconsistencies"] == 0:
-                confidence_factors.append(1.0)
-            else:
-                confidence_factors.append(0.3)
-            
-            if summary["identity_switches"] <= 2:
-                confidence_factors.append(1.0)
-            else:
-                confidence_factors.append(max(0.0, 1.0 - (summary["identity_switches"] - 2) / 10.0))
-            
-            summary["confidence_score"] = float(np.mean(confidence_factors)) if confidence_factors else 0.0
-            
-            return summary
-            
-        except Exception as e:
-            logger.error(f"Ошибка генерации сводки: {e}")
-            return {
-                "total_anomalies": 0,
-                "critical_findings": ["Ошибка анализа"],
-                "identity_switches": 0,
-                "medical_inconsistencies": 0,
-                "temporal_coverage": {},
-                "confidence_score": 0.0
-            }
-
-    def _convert_results_to_dataframe(self, analysis_results: Dict[str, Any]) -> pd.DataFrame:
-        """Преобразование результатов в DataFrame для CSV экспорта"""
-        try:
-            rows = []
-            
-            # Извлечение аномалий
-            if "anomalies" in analysis_results:
-                anomalies = analysis_results["anomalies"]
-                
-                for anomaly_type, anomaly_list in anomalies.items():
-                    if isinstance(anomaly_list, list):
-                        for anomaly in anomaly_list:
-                            row = {
-                                "type": "anomaly",
-                                "subtype": anomaly_type,
-                                "date": anomaly.get("date", ""),
-                                "metric": anomaly.get("metric", ""),
-                                "value": anomaly.get("value", ""),
-                                "severity": anomaly.get("severity", ""),
-                                "description": str(anomaly)
-                            }
-                            rows.append(row)
-            
-            # Извлечение переключений идентичности
-            if "identity_switching" in analysis_results:
-                transitions = analysis_results["identity_switching"].get("identity_transitions", [])
-                
-                for transition in transitions:
-                    row = {
-                        "type": "identity_switch",
-                        "subtype": "transition",
-                        "date": transition.get("transition_date", ""),
-                        "metric": "identity_change",
-                        "value": f"{transition.get('from_identity', '')} -> {transition.get('to_identity', '')}",
-                        "severity": "high" if transition.get("gap_days", 0) < 7 else "medium",
-                        "description": f"Переход от {transition.get('from_identity', '')} к {transition.get('to_identity', '')} через {transition.get('gap_days', 0)} дней"
-                    }
-                    rows.append(row)
-            
-            if not rows:
-                # Создание пустого DataFrame с нужными колонками
-                return pd.DataFrame(columns=["type", "subtype", "date", "metric", "value", "severity", "description"])
-            
-            return pd.DataFrame(rows)
-            
-        except Exception as e:
-            logger.error(f"Ошибка преобразования в DataFrame: {e}")
-            return pd.DataFrame()
-
-    def _generate_html_report(self, report_data: Dict[str, Any]) -> str:
-        """Генерация HTML отчета"""
-        try:
-            html_template = """
-            <!DOCTYPE html>
-            <html lang="ru">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Отчет временного анализа</title>
-                <style>
-                    body { font-family: Arial, sans-serif; margin: 20px; }
-                    .header { background-color: #f0f0f0; padding: 20px; border-radius: 5px; }
-                    .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
-                    .critical { background-color: #ffebee; border-color: #f44336; }
-                    .warning { background-color: #fff3e0; border-color: #ff9800; }
-                    .normal { background-color: #e8f5e8; border-color: #4caf50; }
-                    table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-                    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-                    th { background-color: #f2f2f2; }
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <h1>Отчет временного анализа</h1>
-                    <p><strong>Дата анализа:</strong> {analysis_date}</p>
-                    <p><strong>Версия анализатора:</strong> {analyzer_version}</p>
-                </div>
-                
-                <div class="section {summary_class}">
-                    <h2>Сводка</h2>
-                    <p><strong>Общий балл достоверности:</strong> {confidence_score:.2f}</p>
-                    <p><strong>Всего аномалий:</strong> {total_anomalies}</p>
-                    <p><strong>Переключений идентичности:</strong> {identity_switches}</p>
-                    <p><strong>Медицинских несоответствий:</strong> {medical_inconsistencies}</p>
-                    {critical_findings_html}
-                </div>
-                
-                {anomalies_section}
-                {identity_section}
-                {medical_section}
-                
-            </body>
-            </html>
-            """
-            
-            # Подготовка данных для шаблона
-            metadata = report_data.get("metadata", {})
-            summary = report_data.get("summary", {})
-            
-            # Определение класса CSS для сводки
-            confidence = summary.get("confidence_score", 0.0)
-            if confidence >= 0.7:
-                summary_class = "normal"
-            elif confidence >= 0.4:
-                summary_class = "warning"
-            else:
-                summary_class = "critical"
-            
-            # Генерация списка критических находок
-            critical_findings = summary.get("critical_findings", [])
-            if critical_findings:
-                critical_findings_html = "<p><strong>Критические находки:</strong></p><ul>"
-                for finding in critical_findings:
-                    critical_findings_html += f"<li>{finding}</li>"
-                critical_findings_html += "</ul>"
-            else:
-                critical_findings_html = "<p><strong>Критических находок не обнаружено</strong></p>"
-            
-            # Заполнение шаблона
-            html_content = html_template.format(
-                analysis_date=metadata.get("analysis_date", "Неизвестно"),
-                analyzer_version=metadata.get("analyzer_version", "Неизвестно"),
-                summary_class=summary_class,
-                confidence_score=confidence,
-                total_anomalies=summary.get("total_anomalies", 0),
-                identity_switches=summary.get("identity_switches", 0),
-                medical_inconsistencies=summary.get("medical_inconsistencies", 0),
-                critical_findings_html=critical_findings_html,
-                anomalies_section="<!-- Секция аномалий -->",
-                identity_section="<!-- Секция идентичности -->",
-                medical_section="<!-- Медицинская секция -->"
-            )
-            
-            return html_content
-            
-        except Exception as e:
-            logger.error(f"Ошибка генерации HTML отчета: {e}")
-            return f"<html><body><h1>Ошибка генерации отчета</h1><p>{str(e)}</p></body></html>"
 
     def self_test(self) -> None:
         """Самотестирование модуля"""
@@ -2097,55 +1328,13 @@ class TemporalAnalyzer:
             switching_patterns = self.analyze_identity_switching_patterns(timeline)
             logger.info(f"Тест паттернов смены: систематические={switching_patterns.get('systematic_patterns_detected', False)}")
             
-            # Тест валидации старения
-            test_identity_data = {
-                "temporal_points": [
-                    {
-                        "date": test_dates[0],
-                        "age": 67.5,
-                        "metrics": {
-                            "skull_width_ratio": 1.0,
-                            "cheek_fullness_ratio": 0.8,
-                            "skin_texture_score": 0.7
-                        }
-                    },
-                    {
-                        "date": test_dates[10],
-                        "age": 68.0,
-                        "metrics": {
-                            "skull_width_ratio": 1.001,
-                            "cheek_fullness_ratio": 0.78,
-                            "skin_texture_score": 0.69
-                        }
-                    }
-                ]
-            }
-            
-            validation = self.validate_aging_consistency_for_identity(test_identity_data)
-            logger.info(f"Тест валидации старения: консистентность={validation.get('is_consistent', False)}")
-            
-            # Тест калибровки
-            calibration = self.calibrate_temporal_analysis_thresholds(test_data)
-            logger.info(f"Тест калибровки: качество={calibration.get('calibration_quality', 0.0):.3f}")
-            
-            # Тест экспорта отчета
-            test_results = {
-                "anomalies": anomalies,
-                "identity_switching": switching_patterns,
-                "aging_validation": validation,
-                "timeline": timeline
-            }
-            
-            report_path = self.export_temporal_analysis_report(test_results, "json")
-            logger.info(f"Тест экспорта отчета: {report_path}")
-            
         except Exception as e:
             logger.error(f"Ошибка самотестирования: {e}")
         
         logger.info("=== Самотестирование завершено ===")
 
-    # ==================== ТОЧКА ВХОДА ====================
+# ==================== ТОЧКА ВХОДА ====================
 
-    if __name__ == "__main__":
-        analyzer = TemporalAnalyzer()
-        analyzer.self_test()
+if __name__ == "__main__":
+    analyzer = TemporalAnalyzer()
+    analyzer.self_test()
